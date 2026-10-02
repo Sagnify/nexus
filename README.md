@@ -394,6 +394,23 @@ npm run build:ci
 
 ---
 
+## Continuous Integration (CI Pipeline)
+
+The project includes an automated GitHub Actions CI pipeline configured in [`.github/workflows/ci.yml`](https://github.com/Sagnify/nexus/actions/workflows/ci.yml):
+
+- **Frontend CI (`ubuntu-latest`)**:
+  - Node.js 20.x dependency caching
+  - Clean dependency installation (`npm ci`)
+  - TypeScript typechecking (`npm run typecheck`)
+  - Vite and Electron bundle build verification (`npm run build:ci`)
+- **Backend CI (`windows-latest`)**:
+  - Python 3.12 environment with pip caching
+  - Full dependency installation (`pip install -r requirements.txt`)
+  - Alembic migration integrity verification (`alembic heads`)
+  - Unit test suite execution covering authentication, database isolation, recommendations, Word automation, and media player tools.
+
+---
+
 ## 👥 Hackathon Team & Technology Stack
 
 NEXUS was engineered as a high-performance agent runtime designed to demonstrate what real-world desktop intelligence should feel like: fast, deterministic, safe, and verifiable.
