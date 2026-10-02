@@ -13,7 +13,7 @@ let tray: Tray | null = null;
 let reregisterInterval: ReturnType<typeof setInterval> | null = null;
 let loopbackServer: http.Server | null = null;
 
-const WINDOW_WIDTH = 860;
+const WINDOW_WIDTH = 700;
 const INITIAL_HEIGHT = 440;
 
 const PILL_WIDTH = 640;
@@ -322,22 +322,30 @@ function showWindow() {
     return;
   }
 
-  // Use 'screen-saver' level to break through fullscreen apps and game overlays.
-  // setVisibleOnAllWorkspaces ensures it appears on all virtual desktops.
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.show();
-  mainWindow.focus();
-  mainWindow.moveTop();
-  mainWindow.webContents.send('window-shown');
+  if (process.platform === 'darwin') {
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    mainWindow.setAlwaysOnTop(true, 'screen-saver');
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.moveTop();
+    setTimeout(() => {
+      if (mainWindow && mainWindow.isVisible()) {
+        mainWindow.setAlwaysOnTop(true, 'pop-up-menu');
+        mainWindow.setVisibleOnAllWorkspaces(false);
+      }
+    }, 350);
+  } else {
+    // Windows & Linux: Keep alwaysOnTop standard and NEVER cycle setVisibleOnAllWorkspaces
+    // or levels via setTimeout. Doing so triggers Windows DWM to re-evaluate layered window
+    // composition attributes, which strips the WS_EX_LAYERED alpha transparency and turns the
+    // entire window surface into an opaque solid black box.
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.moveTop();
+  }
 
-  // Relax the always-on-top level after showing so it doesn't cover everything forever
-  setTimeout(() => {
-    if (mainWindow && mainWindow.isVisible()) {
-      mainWindow.setAlwaysOnTop(true, 'pop-up-menu');
-      mainWindow.setVisibleOnAllWorkspaces(false);
-    }
-  }, 350);
+  mainWindow.webContents.send('window-shown');
 }
 
 function hideWindow() {

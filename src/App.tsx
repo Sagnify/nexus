@@ -320,10 +320,10 @@ export const App: React.FC = () => {
     const el = cardRef.current;
     if (!el || !window.electronAPI?.resizeWindow) return;
     const cardH = Math.ceil(Math.max(el.getBoundingClientRect().height, el.scrollHeight, el.offsetHeight));
-    const totalH = Math.min(cardH + 116, 940);
+    const totalH = Math.min(cardH + 16, 940);
     if (totalH > 60 && Math.abs(totalH - lastHeightRef.current) > 2) {
       lastHeightRef.current = totalH;
-      window.electronAPI.resizeWindow(860, totalH, 'center');
+      window.electronAPI.resizeWindow(700, totalH, 'center');
     }
   }, [isPillOnlyWindow]);
 
@@ -721,8 +721,8 @@ export const App: React.FC = () => {
 
   if (isInTeachFlow) {
     return (
-      <div className="w-[860px] max-w-[860px] min-w-[860px] select-none pt-4 px-12 pb-24 mx-auto">
-        <div className="w-full max-w-[680px] mx-auto rounded-[20px] overflow-hidden">
+      <div className="w-[700px] max-w-[700px] min-w-[700px] select-none p-2 mx-auto">
+        <div className="w-full max-w-[684px] mx-auto rounded-[20px] overflow-hidden">
           {/* Phase 1: Recording (non-Electron fallback pill inside the window) */}
           {teachMode.isTeaching && !window.electronAPI && (
             <RecordingPill
@@ -795,7 +795,7 @@ export const App: React.FC = () => {
   // Otherwise, this is the main Spotlight window:
   return (
     <div
-      className="w-[860px] max-w-[860px] min-w-[860px] select-none pt-4 px-12 pb-24 mx-auto"
+      className="w-[700px] max-w-[700px] min-w-[700px] select-none p-2 mx-auto"
       onClick={(e) => {
         if (e.target === e.currentTarget && !taskState.isRunning) {
           handleClose();
@@ -804,7 +804,7 @@ export const App: React.FC = () => {
     >
       <div
         ref={cardRef}
-        className="w-full max-w-[680px] mx-auto rounded-[20px] glass-panel overflow-hidden"
+        className="w-full max-w-[684px] mx-auto rounded-[20px] glass-panel overflow-hidden"
       >
         <SpotlightBar
           query={query}
