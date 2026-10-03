@@ -304,14 +304,11 @@ export const App: React.FC = () => {
     }
   }, [isPillOnlyWindow, teachMode.isTeaching, shouldShowPill, taskState.taskId]);
 
-  // When draft skill is compiled (from desktop pill or browser extension finish), show review modal in Spotlight
-  useEffect(() => {
-    if (isPillOnlyWindow) return;
-    if (teachMode.draftSkill) {
-      setIsSkillReviewOpen(true);
-      window.electronAPI?.showWindow();
-    }
-  }, [isPillOnlyWindow, teachMode.draftSkill]);
+  const isInTeachFlow =
+    teachMode.isTeaching ||
+    teachMode.isCompilingDraft ||
+    Boolean(teachMode.draftSkill) ||
+    isSkillReviewOpen;
 
   // Send exact card height to Electron main process to resize Spotlight window
   const lastHeightRef = useRef<number>(0);
@@ -327,13 +324,26 @@ export const App: React.FC = () => {
     }
   }, [isPillOnlyWindow]);
 
+  // When draft skill is compiled (from desktop pill or browser extension finish), show review modal in Spotlight
+  useEffect(() => {
+    if (isPillOnlyWindow) return;
+    if (teachMode.draftSkill) {
+      setIsSkillReviewOpen(true);
+      window.electronAPI?.showWindow();
+      setTimeout(() => {
+        syncSpotlightHeight();
+      }, 60);
+    }
+  }, [isPillOnlyWindow, teachMode.draftSkill, syncSpotlightHeight]);
+
   useEffect(() => {
     if (isPillOnlyWindow) return;
     const el = cardRef.current;
     if (!el) return;
-    // Only observe cardRef, NEVER observe rootEl or window resize to prevent feedback loops
+    // Observe cardRef and immediately sync height
     const ro = new ResizeObserver(syncSpotlightHeight);
     ro.observe(el);
+    syncSpotlightHeight();
 
     const handleWindowShow = () => {
       // Rotate suggested tasks on every launcher opening
@@ -363,7 +373,7 @@ export const App: React.FC = () => {
       ro.disconnect();
       if (unsubShow) unsubShow();
     };
-  }, [isPillOnlyWindow, syncSpotlightHeight, resetTask]);
+  }, [isPillOnlyWindow, isInTeachFlow, teachMode.draftSkill, isSkillReviewOpen, syncSpotlightHeight, resetTask]);
 
   useEffect(() => {
     if (isPillOnlyWindow) return;
@@ -716,15 +726,9 @@ export const App: React.FC = () => {
   // While teaching (recording → compiling → reviewing draft) the spotlight bar
   // is completely hidden. Only the relevant teach-phase UI is shown.
   // The spotlight comes back only after the draft is saved or discarded.
-  const isInTeachFlow =
-    teachMode.isTeaching ||
-    teachMode.isCompilingDraft ||
-    Boolean(teachMode.draftSkill) ||
-    isSkillReviewOpen;
-
   if (isInTeachFlow) {
     return (
-      <div className="w-[700px] max-w-[700px] min-w-[700px] select-none p-2 mx-auto">
+      <div ref={cardRef} className="w-[700px] max-w-[700px] min-w-[700px] select-none p-2 mx-auto">
         <div className="w-full max-w-[684px] mx-auto rounded-[20px] overflow-hidden">
           {/* Phase 1: Recording (non-Electron fallback pill inside the window) */}
           {teachMode.isTeaching && !window.electronAPI && (

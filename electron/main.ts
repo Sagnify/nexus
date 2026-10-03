@@ -697,9 +697,13 @@ if (!gotTheLock) {
           return; // Dimensions unchanged: prevent Win32 re-layout loops
         }
         const primaryDisplay = screen.getPrimaryDisplay();
-        const { width: screenWidth } = primaryDisplay.workAreaSize;
+        const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
         const x = Math.round((screenWidth - targetWidth) / 2);
-        mainWindow.setBounds({ x, y: currentBounds.y, width: targetWidth, height: h }, false);
+        let targetY = currentBounds.y;
+        if (targetY + h > screenHeight - 15) {
+          targetY = Math.max(20, screenHeight - h - 15);
+        }
+        mainWindow.setBounds({ x, y: targetY, width: targetWidth, height: h }, false);
       }
     });
 

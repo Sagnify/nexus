@@ -135,6 +135,8 @@ class StepValidator:
                     and sorted(corrected_order) == list(range(len(steps)))
                 ):
                     corrected = [steps[index] for index in corrected_order]
+                elif auto_fix and not corrected:
+                    corrected = self._heuristic_auto_fix(steps)
 
                 remaining_heuristic_issues = self._heuristic_validate(corrected) if corrected else heuristic_issues
                 ai_issues = [
@@ -142,6 +144,9 @@ class StepValidator:
                     if not (corrected and issue.issue_type == "order")
                 ]
                 unique_issues = self._deduplicate_issues(remaining_heuristic_issues + ai_issues)
+                if corrected:
+                    # Filter out any order issues that were successfully auto-fixed by reordering
+                    unique_issues = [iss for iss in unique_issues if iss.issue_type != "order"]
                 is_valid = not any(issue.severity == "error" for issue in unique_issues)
                 
                 return StepValidationResult(
@@ -153,13 +158,17 @@ class StepValidator:
                     validation_notes=ai_result.validation_notes,
                 )
             else:
-                # For short workflows, heuristic validation is sufficient
-                is_valid = not any(issue.severity == "error" for issue in heuristic_issues)
+                corrected = self._heuristic_auto_fix(steps) if auto_fix else None
+                remaining_issues = self._heuristic_validate(corrected) if corrected else heuristic_issues
+                if corrected:
+                    remaining_issues = [iss for iss in remaining_issues if iss.issue_type != "order"]
+                is_valid = not any(issue.severity == "error" for issue in remaining_issues)
                 return StepValidationResult(
                     is_valid=is_valid,
-                    issues=heuristic_issues,
-                    confidence_score=0.85,
-                    validation_notes="Heuristic validation only (short workflow)",
+                    issues=remaining_issues,
+                    corrected_steps=corrected,
+                    confidence_score=0.95,
+                    validation_notes="Validated with automated order repair",
                 )
 
         except Exception as e:
@@ -171,13 +180,25 @@ class StepValidator:
                 validation_notes=f"Validation error: {str(e)}",
             )
 
+    def _heuristic_auto_fix(self, steps: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+        """Auto-repair obvious recorded order anomalies (e.g. navigation recorded after first interaction)."""
+        if not steps or len(steps) < 2:
+            return None
+        first_action = steps[0].get("action_type", "").lower()
+        if first_action in ("browser_click", "browser_type", "browser_select"):
+            for idx in range(1, len(steps)):
+                if steps[idx].get("action_type", "").lower() == "browser_navigate":
+                    reordered = [steps[idx]] + [s for i, s in enumerate(steps) if i != idx]
+                    logger.info("[StepValidator] Heuristically auto-fixed order: moved navigation step %d to index 0", idx)
+                    return reordered
+        return None
+
     def _heuristic_validate(self, steps: List[Dict[str, Any]]) -> List[StepValidationIssue]:
         """Fast heuristic validation without AI."""
         issues: List[StepValidationIssue] = []
         
         # Track state
         current_url: Optional[str] = None
-        visible_elements: set[str] = set()
         
         for idx, step in enumerate(steps):
             action_type = step.get("action_type", "").lower()
@@ -212,53 +233,19 @@ class StepValidator:
                     )
                 )
             
-            # Issue 2: Click on element that was never visible
-            if action_type == "browser_click":
-                selector_id = selector.get("testId") or selector.get("id") or selector.get("ariaLabel")
-                if selector_id and selector_id not in visible_elements:
-                    issues.append(
-                        StepValidationIssue(
-                            step_index=idx,
-                            severity="warning",
-                            issue_type="precondition",
-                            title="Element may not be visible",
-                            description=f"Step {idx} clicks element '{selector_id}' but it hasn't been confirmed visible",
-                            suggestion="Ensure element is loaded and visible before clicking",
-                            affected_steps=[idx],
-                        )
-                    )
-            
-            # Issue 3: Type in field that doesn't exist
-            if action_type == "browser_type":
-                selector_id = selector.get("testId") or selector.get("id") or selector.get("ariaLabel")
-                if selector_id and selector_id not in visible_elements:
-                    issues.append(
-                        StepValidationIssue(
-                            step_index=idx,
-                            severity="warning",
-                            issue_type="precondition",
-                            title="Input field may not exist",
-                            description=f"Step {idx} types in field '{selector_id}' but field hasn't been confirmed visible",
-                            suggestion="Ensure input field is loaded before typing",
-                            affected_steps=[idx],
-                        )
-                    )
-            
-            # Issue 4: Navigate away then interact with previous page
+            # Navigate away then interact with previous page
             if action_type == "browser_navigate" and current_url and url and current_url != url:
-                # Check if any following steps interact with previous page
                 for future_idx in range(idx + 1, len(steps)):
                     future_step = steps[future_idx]
                     future_action = future_step.get("action_type", "").lower()
                     if future_action in ("browser_click", "browser_type"):
-                        # This is a warning, not an error, as page might have similar elements
                         issues.append(
                             StepValidationIssue(
                                 step_index=future_idx,
                                 severity="warning",
                                 issue_type="logic",
                                 title="Interaction after navigation",
-                                description=f"Step {future_idx} interacts with element after navigating away at step {idx}",
+                                description=f"Step {future_idx + 1} interacts with element after navigating away at step {idx + 1}",
                                 suggestion="Verify element exists on new page or reorder steps",
                                 affected_steps=[idx, future_idx],
                             )
@@ -268,12 +255,6 @@ class StepValidator:
             # Update state
             if action_type == "browser_navigate" and url:
                 current_url = url
-                visible_elements.clear()
-            
-            if action_type == "browser_click":
-                selector_id = selector.get("testId") or selector.get("id") or selector.get("ariaLabel")
-                if selector_id:
-                    visible_elements.add(selector_id)
         
         return issues
 

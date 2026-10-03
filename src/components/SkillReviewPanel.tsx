@@ -207,7 +207,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
 
   return (
     <div
-      className="w-full flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)]"
+      className="w-full flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)] max-h-[84vh]"
       style={{
         background: "rgba(13, 14, 20, 0.98)",
         backdropFilter: "blur(32px) saturate(180%)",
@@ -215,7 +215,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       }}
     >
       {/* ── HEADER BAR ── */}
-      <div className="px-5 py-3.5 border-b border-white/[0.08] flex items-center justify-between bg-white/[0.03]">
+      <div className="px-5 py-3.5 border-b border-white/[0.08] flex items-center justify-between bg-white/[0.03] shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg bg-sky-500/10 border border-sky-500/25 flex items-center justify-center text-sky-400 shrink-0">
             <Sparkles className="w-3.5 h-3.5" />
@@ -256,7 +256,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
 
       {/* ── ERROR BANNER ── */}
       {error && (
-        <div className="px-5 py-2 bg-rose-500/10 border-b border-rose-500/25 text-rose-300 text-[11px] flex items-center gap-2">
+        <div className="px-5 py-2 bg-rose-500/10 border-b border-rose-500/25 text-rose-300 text-[11px] flex items-center gap-2 shrink-0">
           <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
           <span>{error}</span>
         </div>
@@ -264,14 +264,14 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
 
       {/* ── VALIDATION ISSUES BANNER ── */}
       {validationIssues.length > 0 && (
-        <div className="px-5 py-3 bg-amber-500/10 border-b border-amber-500/25">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/25 shrink-0">
+          <div className="flex items-center gap-2 mb-1.5">
             <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             <span className="text-[11px] font-semibold text-amber-300 uppercase tracking-wider">
               Step Validation Issues ({validationIssues.length})
             </span>
           </div>
-          <div className="space-y-1.5 max-h-[120px] overflow-y-auto">
+          <div className="space-y-1.5 max-h-[90px] overflow-y-auto pr-1">
             {validationIssues.map((issue, idx) => {
               const severityColor = {
                 error: "text-rose-300 bg-rose-500/10 border-rose-500/20",
@@ -298,7 +298,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       )}
 
       {/* ── SCROLLABLE BODY ── */}
-      <div className="p-5 space-y-4 max-h-[460px] overflow-y-auto bg-black/20">
+      <div className="p-5 space-y-4 max-h-[440px] flex-1 min-h-0 overflow-y-auto bg-black/20">
         {/* Name and Description Inputs */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>
@@ -455,7 +455,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       </div>
 
       {/* ── FOOTER ACTIONS ── */}
-      <div className="px-5 py-3.5 border-t border-white/[0.08] flex items-center justify-between bg-white/[0.02]">
+      <div className="px-5 py-3.5 border-t border-white/[0.08] flex items-center justify-between bg-white/[0.02] shrink-0">
         <button
           type="button"
           onClick={onClose}
