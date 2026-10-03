@@ -26,6 +26,16 @@ from backend.core.device_identity import get_device_id
 logger = logging.getLogger("nexus.scheduler")
 
 
+def _is_email_brief_task(task: ScheduledTask) -> bool:
+    """Recognize email-notification schedules created before email briefs were normalized."""
+    if (task.normalized_intent or {}).get("action") == "gmail_brief_messages":
+        return True
+    task_text = f"{task.name or ''} {task.prompt or ''}".lower()
+    return bool(re.search(r"\b(?:email|emails|e-mail|e-mails|mail|inbox|message|messages)\b", task_text)) and bool(
+        re.search(r"\b(?:notify|alert)\b", task_text)
+    ) and bool(re.search(r"\b(?:new|recent|received|unread|inbox)\b", task_text))
+
+
 class SchedulerService:
     def __init__(self, poll_interval_seconds: int = 15):
         self.poll_interval = poll_interval_seconds
@@ -197,8 +207,6 @@ class SchedulerService:
             title = f"Reminder (Missed): {task.name}"
 
         message = task.prompt
-        await send_user_notification(title, message, notification_type="reminder", speak=True)
-
         completed_at = datetime.datetime.now(datetime.timezone.utc)
         await repo.update_run(
             run.id,
@@ -209,6 +217,17 @@ class SchedulerService:
         await repo.update_after_run(task.id, last_run_at=completed_at, next_run_at=next_run, success=True, status_override="completed")
         if session:
             await session.commit()
+        await send_user_notification(
+            title,
+            message,
+            notification_type="reminder",
+            speak=True,
+            action={
+                "type": "scheduled_task_response",
+                "task_id": str(task.id),
+                "run_id": str(run.id),
+            },
+        )
         logger.info("[Scheduler] Completed reminder '%s' (next run: %s).", task.name, next_run)
 
     async def _execute_automation(
@@ -247,9 +266,12 @@ class SchedulerService:
             return
 
         exec_cfg = task.execution_config or {}
+        is_email_brief = _is_email_brief_task(task)
 
         # 2. Pre-flight Connector Check
-        required_connectors = exec_cfg.get("required_connectors", [])
+        required_connectors = list(exec_cfg.get("required_connectors", []))
+        if is_email_brief and "gmail" not in required_connectors:
+            required_connectors.append("gmail")
         for conn_id in required_connectors:
             connector_creds = credentials_store.get_credential(str(task.user_id), conn_id)
             has_auth = bool(
@@ -269,17 +291,15 @@ class SchedulerService:
                 await repo.update_after_run(task.id, last_run_at=completed_at, next_run_at=next_run, success=False, status_override="blocked")
                 if session:
                     await session.commit()
-                notification_action = None
-                if (task.normalized_intent or {}).get("action") == "gmail_brief_messages":
-                    notification_action = {
-                        "type": "email_brief",
-                        "task_id": str(task.id),
-                        "run_id": str(run.id),
-                    }
+                notification_action = {
+                    "type": "scheduled_task_response",
+                    "task_id": str(task.id),
+                    "run_id": str(run.id),
+                }
                 await send_user_notification(
                     f"Scheduled Automation Blocked: {task.name}",
                     f"Action Required: '{conn_id}' connector authorization missing.",
-                    notification_type="email_brief" if notification_action else "automation",
+                    notification_type="automation",
                     action=notification_action,
                 )
                 return
@@ -293,6 +313,13 @@ class SchedulerService:
 
         runtime_prompt = prompt_template.replace("{date}", date_str).replace("{datetime}", datetime_str)
         intent_cat = (task.normalized_intent or {}).get("category") or "general"
+        if is_email_brief:
+            runtime_prompt = (
+                "Read the newest unread Gmail messages received from other people and produce a concise inbox brief. "
+                "Include senders, subjects, important details, and any requested follow-up. Do not send, draft, modify, "
+                "or delete email."
+            )
+            intent_cat = "email"
 
         try:
             cur_target = target_manager.get_active_target().model_dump()
@@ -378,14 +405,11 @@ class SchedulerService:
 
         # Notify user of completion or failure
         title = f"Scheduled Automation: {task.name}"
-        notification_action = None
-        is_email_brief = (task.normalized_intent or {}).get("action") == "gmail_brief_messages"
-        if is_email_brief:
-            notification_action = {
-                "type": "email_brief",
-                "task_id": str(task.id),
-                "run_id": str(run.id),
-            }
+        notification_action = {
+            "type": "scheduled_task_response",
+            "task_id": str(task.id),
+            "run_id": str(run.id),
+        }
         if success:
             body = f"Success. Generated {len(artifacts)} artifact(s)." if artifacts else final_resp[:120]
             if is_email_brief:
@@ -398,7 +422,7 @@ class SchedulerService:
         await send_user_notification(
             title,
             body,
-            notification_type="email_brief" if notification_action else "automation",
+            notification_type="automation",
             action=notification_action,
         )
 

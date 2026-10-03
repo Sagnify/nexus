@@ -155,7 +155,7 @@ async def test_gmail_list_messages_reads_metadata_without_sending(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gmail_brief_reads_full_bodies_and_summarizes_without_sending(monkeypatch):
+async def test_gmail_brief_uses_metadata_and_builds_a_compact_read_only_list(monkeypatch):
     adapter = GoogleAPIAdapter(get_catalog_entry("gmail"))
     calls = []
 
@@ -182,7 +182,7 @@ async def test_gmail_brief_reads_full_bodies_and_summarizes_without_sending(monk
                 return FakeResponse({"messages": [{"id": "message-2"}], "resultSizeEstimate": 1})
             return FakeResponse({
                 "id": "message-2",
-                "snippet": "Meeting moved to Friday",
+                "snippet": "Meeting moved to Friday. https://calendar.example.com/event/42",
                 "payload": {
                     "mimeType": "text/plain",
                     "body": {"data": "TWVldGluZyBtb3ZlZCB0byBGcmlkYXku"},
@@ -197,17 +197,18 @@ async def test_gmail_brief_reads_full_bodies_and_summarizes_without_sending(monk
         async def post(self, *args, **kwargs):
             raise AssertionError("Summarizing Gmail must not issue a POST request")
 
-    llm_call = AsyncMock(return_value=MagicMock(content="One meeting was moved to Friday."))
     monkeypatch.setattr("backend.connectors.adapters.google.httpx.AsyncClient", lambda **kwargs: FakeClient())
-    monkeypatch.setattr("backend.agent.router.model_router.ainvoke_with_dynamic_switch", llm_call)
 
     result = await adapter._execute_gmail("gmail_brief_messages", {"max_results": 1}, "test-token")
 
     assert result.success is True
-    assert result.output == "One meeting was moved to Friday."
+    assert "## New email brief" in result.output
+    assert "Schedule change" in result.output
+    assert "ID: `message-2`" in result.output
+    assert "[Open in Gmail](https://mail.google.com/mail/u/0/#all/message-2)" in result.output
+    assert "[Open link](https://calendar.example.com/event/42)" in result.output
     assert calls[0][1]["q"] == "-from:me"
-    assert calls[1][1] == [("format", "full")]
-    assert "Meeting moved to Friday." in llm_call.await_args.args[0][1].content
+    assert calls[1][1] == [("format", "metadata"), ("metadataHeaders", "From"), ("metadataHeaders", "Subject"), ("metadataHeaders", "Date")]
 
 
 def test_permission_gate_integration():
@@ -414,4 +415,3 @@ def test_spotify_oauth_callback_consumes_pkce_state(monkeypatch):
     exchange.assert_awaited_once()
     assert connect.await_args.args[1]["refresh_token"] == "refresh-token"
     assert state not in connectors_api._spotify_oauth_sessions
-

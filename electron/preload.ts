@@ -17,7 +17,7 @@ export interface ElectronAPI {
   onWindowBlur: (callback: () => void) => () => void;
   onWindowShow: (callback: () => void) => () => void;
   onWindowHide: (callback: () => void) => () => void;
-  onScheduledEmailBrief?: (callback: (target: { taskId: string; runId: string }) => void) => () => void;
+  onScheduledTaskResponse?: (callback: (target: { taskId: string; runId: string }) => void) => () => void;
   wakeSpotlight: () => void;
   onRemoteTeachFinished?: (callback: () => void) => () => void;
   onVoiceStartCapture: (callback: () => void) => () => void;
@@ -108,11 +108,11 @@ const api: ElectronAPI = {
       ipcRenderer.removeListener('window-hidden', handler);
     };
   },
-  onScheduledEmailBrief: (callback: (target: { taskId: string; runId: string }) => void) => {
+  onScheduledTaskResponse: (callback: (target: { taskId: string; runId: string }) => void) => {
     const handler = (_event: any, target: { taskId: string; runId: string }) => callback(target);
-    ipcRenderer.on('open-scheduled-email-brief', handler);
-    ipcRenderer.send('scheduled-email-brief-ready');
-    return () => ipcRenderer.removeListener('open-scheduled-email-brief', handler);
+    ipcRenderer.on('open-scheduled-task-response', handler);
+    ipcRenderer.send('scheduled-task-response-ready');
+    return () => ipcRenderer.removeListener('open-scheduled-task-response', handler);
   },
   resizeExcelCopilot: (hwnd: number, width: number, height: number) =>
     ipcRenderer.send('excel-copilot-resize', { hwnd, width, height }),

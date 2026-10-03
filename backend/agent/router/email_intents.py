@@ -10,7 +10,7 @@ def classify_email_request(text: str) -> str:
         return "unrelated"
 
     is_read = bool(re.search(
-        r"\b(?:check|read|show|list|get|fetch|review|summarize|summary|brief|digest|overview|recap|search|find|view)\b",
+        r"\b(?:check|read|show|list|get|fetch|review|summarize|summary|brief|digest|overview|recap|search|find|view|notify|alert)\b",
         lower,
     ))
     is_send = bool(re.search(r"\bsend\b", lower))

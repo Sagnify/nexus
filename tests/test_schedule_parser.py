@@ -4,6 +4,7 @@ import unittest
 from zoneinfo import ZoneInfo
 
 from backend.services.schedule_parser import schedule_parser, calculate_next_run
+from backend.agent.router.email_intents import classify_email_request
 
 
 class TestScheduleParser(unittest.IsolatedAsyncioTestCase):
@@ -118,6 +119,16 @@ class TestScheduleParser(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(task_type, "automation")
         self.assertEqual(intent["action"], "gmail_send_email")
+
+    def test_new_email_notification_becomes_an_unread_brief(self):
+        task_type, intent, config = schedule_parser._extract_automation_metadata(
+            "system to notify for new emails",
+            "system to notify for new emails",
+        )
+        self.assertEqual(task_type, "automation")
+        self.assertEqual(intent["action"], "gmail_brief_messages")
+        self.assertEqual(config["action_type"], "email_brief")
+        self.assertEqual(classify_email_request("system to notify for new emails"), "read")
 
     def test_parse_ambiguous_no_time(self):
         prompt = "Remind me to call John"

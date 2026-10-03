@@ -22,7 +22,7 @@ import { useVoiceOutput } from './hooks/useVoiceOutput';
 import { TaskState, HistoryItem } from './types/nexus';
 import { formatSpokenResponse } from './utils/speechUtils';
 import { ExcelCopilot } from './components/ExcelCopilot';
-import { EmailBriefView } from './components/EmailBriefView';
+import { ScheduledTaskResponseView } from './components/ScheduledTaskResponseView';
 import { getPersonalizedPredictions, recordPredictionFeedback } from './services/recommendationEngine';
 import { classifyQuerySafety } from './services/safetyFilter';
 
@@ -59,7 +59,7 @@ export const App: React.FC = () => {
   const [isSkillsOpen, setIsSkillsOpen] = useState(false);
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
   const [isConnectorsOpen, setIsConnectorsOpen] = useState(false);
-  const [scheduledEmailBrief, setScheduledEmailBrief] = useState<{ taskId: string; runId: string } | null>(null);
+  const [scheduledTaskResponse, setScheduledTaskResponse] = useState<{ taskId: string; runId?: string } | null>(null);
   const [skillsInitialTab, setSkillsInitialTab] = useState<'library' | 'teach'>('library');
   const [isSkillReviewOpen, setIsSkillReviewOpen] = useState(false);
   const [skillSaveError, setSkillSaveError] = useState<string | null>(null);
@@ -93,8 +93,8 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (isPillOnlyWindow) return;
-    const unsubscribe = window.electronAPI?.onScheduledEmailBrief?.((target) => {
-      setScheduledEmailBrief(target);
+    const unsubscribe = window.electronAPI?.onScheduledTaskResponse?.((target) => {
+      setScheduledTaskResponse(target);
       setIsSettingsOpen(false);
       setIsHistoryOpen(false);
       setIsSkillsOpen(false);
@@ -125,7 +125,7 @@ export const App: React.FC = () => {
 
   const isDedicatedPage = Boolean(
     isScheduleOpen ||
-    Boolean(scheduledEmailBrief) ||
+    Boolean(scheduledTaskResponse) ||
     isSettingsOpen ||
     isConnectorsOpen ||
     isSkillsOpen ||
@@ -601,6 +601,8 @@ export const App: React.FC = () => {
         } else if (isSkillReviewOpen) {
           setIsSkillReviewOpen(false);
           teachMode.setDraftSkill(null);
+        } else if (scheduledTaskResponse) {
+          setScheduledTaskResponse(null);
         } else if (isHistoryOpen) {
           setIsHistoryOpen(false);
         } else if (isSettingsOpen) {
@@ -740,12 +742,12 @@ export const App: React.FC = () => {
     );
   }
 
-  if (scheduledEmailBrief) {
+  if (scheduledTaskResponse) {
     return (
-      <EmailBriefView
-        taskId={scheduledEmailBrief.taskId}
-        runId={scheduledEmailBrief.runId}
-        onClose={() => setScheduledEmailBrief(null)}
+      <ScheduledTaskResponseView
+        taskId={scheduledTaskResponse.taskId}
+        runId={scheduledTaskResponse.runId}
+        onClose={() => setScheduledTaskResponse(null)}
       />
     );
   }
@@ -923,6 +925,7 @@ export const App: React.FC = () => {
         {isScheduleOpen ? (
           <SchedulePanel
             onClose={() => setIsScheduleOpen(false)}
+            onOpenResponse={(taskId) => setScheduledTaskResponse({ taskId })}
             onRunPrompt={(p) => {
               setQuery(p);
               setIsScheduleOpen(false);
@@ -988,6 +991,7 @@ export const App: React.FC = () => {
             isSpeaking={isSpeaking}
             onSpeak={(text) => speak(text, settings.voice_output_voice, settings.voice_output_speed)}
             onStopSpeaking={stopSpeaking}
+            onOpenScheduledTaskResponse={(taskId) => setScheduledTaskResponse({ taskId })}
           />
         ) : (
           <SuggestionsList

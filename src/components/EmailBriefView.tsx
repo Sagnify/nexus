@@ -26,12 +26,14 @@ export const EmailBriefView: React.FC<EmailBriefViewProps> = ({ taskId, runId, o
   const [run, setRun] = useState<EmailBriefRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isCached, setIsCached] = useState(false);
 
   useEffect(() => {
     if (!idToken) return;
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setIsCached(false);
 
     fetch(`${BACKEND_URL}/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs?limit=100`, {
       headers: { Authorization: `Bearer ${idToken}` },
@@ -45,9 +47,24 @@ export const EmailBriefView: React.FC<EmailBriefViewProps> = ({ taskId, runId, o
         const match = runs.find((item) => item.id === runId);
         if (!match) throw new Error('This scheduled email brief is no longer available.');
         setRun(match);
+        setIsCached(false);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load this email brief.');
+        if (!cancelled) {
+          const errMsg = err instanceof Error ? err.message : 'Could not load this email brief.';
+          setError(errMsg);
+          // Try to load from browser cache as fallback
+          const cachedRun = sessionStorage.getItem(`email_brief_${runId}`);
+          if (cachedRun) {
+            try {
+              setRun(JSON.parse(cachedRun));
+              setIsCached(true);
+              setError(null);
+            } catch (parseErr) {
+              logger.warn('Failed to parse cached email brief');
+            }
+          }
+        }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -57,6 +74,13 @@ export const EmailBriefView: React.FC<EmailBriefViewProps> = ({ taskId, runId, o
       cancelled = true;
     };
   }, [idToken, taskId, runId]);
+
+  // Cache successful runs
+  useEffect(() => {
+    if (run && !isCached) {
+      sessionStorage.setItem(`email_brief_${runId}`, JSON.stringify(run));
+    }
+  }, [run, runId, isCached]);
 
   const openInbox = () => {
     if (window.electronAPI?.openExternal) window.electronAPI.openExternal(GMAIL_INBOX_URL);
@@ -108,7 +132,9 @@ export const EmailBriefView: React.FC<EmailBriefViewProps> = ({ taskId, runId, o
         </div>
 
         <footer className="flex items-center justify-between gap-3 px-5 py-3 border-t border-white/[0.08]">
-          <span className="text-[11px] text-white/40">Read-only summary of received mail</span>
+          <span className="text-[11px] text-white/40">
+            {isCached ? '📦 Cached summary of received mail' : 'Read-only summary of received mail'}
+          </span>
           <button
             type="button"
             onClick={openInbox}

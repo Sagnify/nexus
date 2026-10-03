@@ -416,8 +416,9 @@ async def evaluator_node(state: NexusState) -> dict:
         step_summaries.append(f"- **{s.get('title')}** ({s.get('tool')}): {res}")
     results_text = "\n".join(step_summaries)
 
-    # If the single step was ai_response, deep_research, or media tools, verify live status before completing
-    if len(plan) == 1 and plan[0].get("tool") in ("ai_response", "deep_research", "play_music", "media_control"):
+    # Single-step read-only connector results are already formatted for display. Preserve them rather than
+    # sending them through a second model, which wastes tokens and can obscure links and message IDs.
+    if len(plan) == 1 and plan[0].get("tool") in ("ai_response", "deep_research", "play_music", "media_control", "gmail_list_messages", "gmail_brief_messages"):
         res = plan[0].get("result") or plan[0].get("error") or "Task completed."
         is_media = plan[0].get("tool") in ("play_music", "media_control")
         is_failed = False

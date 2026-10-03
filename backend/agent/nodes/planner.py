@@ -192,7 +192,12 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
         if connector_id == "gmail":
             request_kind = _classify_gmail_request(goal)
             if request_kind == "read":
-                is_brief = bool(re.search(r"\b(?:brief|digest|summary|summarize|overview|recap)\b", lower))
+                is_notification_request = bool(re.search(r"\b(?:notify|alert)\b", lower)) and bool(
+                    re.search(r"\b(?:new|recent|received|unread|inbox)\b", lower)
+                )
+                is_brief = is_notification_request or bool(
+                    re.search(r"\b(?:brief|digest|summary|summarize|overview|recap)\b", lower)
+                )
                 read_tool = "gmail_brief_messages" if is_brief else "gmail_list_messages"
                 if not tool_registry.has(read_tool):
                     return [{
@@ -202,9 +207,9 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
                         "args": {"answer": "Gmail is connected for sending and drafts only. Reconnect Gmail and approve read-only inbox access before I can read or summarize message contents."},
                         "risk_level": "SAFE",
                     }]
-                is_all_received = bool(re.search(r"\b(?:all|every|received|entire|everything)\b", lower))
+                is_all_received = is_notification_request or bool(re.search(r"\b(?:all|every|received|entire|everything)\b", lower))
                 query = "-from:me" if is_all_received else "in:inbox"
-                if "unread" in lower:
+                if is_notification_request or "unread" in lower:
                     query += " is:unread"
                 elif "starred" in lower:
                     query += " is:starred"
@@ -212,7 +217,7 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
                     "title": "Brief Received Gmail Messages" if is_brief else "Check Recent Gmail Messages",
                     "description": "Read and summarize message bodies without modifying or sending mail." if is_brief else "Read the newest matching inbox messages without modifying or sending mail.",
                     "tool": read_tool,
-                    "args": {"query": query, "max_results": 50 if is_brief else 10},
+                    "args": {"query": query, "max_results": 12 if is_brief else 10},
                     "risk_level": "READ_ONLY",
                 }]
             if request_kind == "clarify":

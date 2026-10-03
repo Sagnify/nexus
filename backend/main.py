@@ -43,6 +43,7 @@ from backend.api.history import router as history_router
 from backend.api.skills import router as skills_router
 from backend.api.scheduled_tasks import router as scheduled_tasks_router
 from backend.api.connectors import router as connectors_router
+from backend.api.email import router as email_router
 from backend.services.scheduler_service import scheduler_service
 from backend.agent.tools.web_automation.extension_bridge import extension_bridge
 from backend.core.extension_installer import ensure_installed, get_extension_path
@@ -109,6 +110,7 @@ app.include_router(history_router, prefix="/api/history", tags=["history"])
 app.include_router(skills_router, prefix="/api/skills", tags=["skills"])
 app.include_router(scheduled_tasks_router, prefix="/api/scheduled-tasks", tags=["scheduled-tasks"])
 app.include_router(connectors_router, prefix="/api/connectors", tags=["connectors"])
+app.include_router(email_router, tags=["email"])
 
 
 @app.exception_handler(TimeoutError)

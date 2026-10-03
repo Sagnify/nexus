@@ -64,7 +64,7 @@ async def send_user_notification(
         try:
             async with httpx.AsyncClient(timeout=1.5) as client:
                 response = await client.post(
-                    "http://127.0.0.1:8765/scheduled-email-brief",
+                    "http://127.0.0.1:8765/scheduled-task-response",
                     json={"title": title, "message": message, "action": action},
                 )
                 delivered_by_electron = response.status_code == 200
@@ -75,7 +75,7 @@ async def send_user_notification(
                         response.text[:300],
                     )
         except Exception as exc:
-            logger.warning("Electron notification bridge unavailable; brief alert will not be clickable: %s", exc)
+            logger.warning("Electron notification bridge unavailable; scheduled-task alert will not be clickable: %s", exc)
 
     # 2. Native Windows Toast fallback. It is informational; Electron handles click actions.
     try:
