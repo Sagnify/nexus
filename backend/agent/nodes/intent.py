@@ -64,8 +64,6 @@ async def intent_node(state: NexusState) -> dict:
                 from backend.agent.skills.matcher import matcher
                 bypass_learned_skill = classify_email_request(user_input) in ("read", "clarify")
                 matched = None if bypass_learned_skill else await matcher.match_skill(user_input, uid, db_session)
-                if not matched and not bypass_learned_skill and uid != LOCAL_USER_ID:
-                    matched = await matcher.match_skill(user_input, LOCAL_USER_ID, db_session)
                 if matched:
                     logger.info("[Intent] Learned skill hit for '%s': '%s'", user_input, matched.skill.name)
                     env = (matched.skill.environment or "browser").lower()

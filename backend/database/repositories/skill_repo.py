@@ -91,17 +91,19 @@ class SkillRepository:
             return []
 
     async def get_active_skills_for_matching(self, user_id: uuid.UUID) -> List[Skill]:
-        """Retrieve all active, non-suspended skills with their latest version for runtime matching."""
-        if not self.session:
+        """Retrieve all active, non-suspended skills with their latest version for runtime matching.
+        
+        STRICT TENANT ISOLATION: Only returns skills belonging directly to user_id.
+        Skills are never leaked or merged across different users or devices.
+        """
+        if not self.session or not user_id:
             return []
 
-        from backend.core.firebase_auth import LOCAL_USER_ID
         where_conds = [
             Skill.is_active.is_(True),
             Skill.health_status != "suspended",
+            Skill.user_id == user_id,
         ]
-        if user_id and user_id != LOCAL_USER_ID:
-            where_conds.append(Skill.user_id.in_([user_id, LOCAL_USER_ID]))
 
         stmt = (
             select(Skill)

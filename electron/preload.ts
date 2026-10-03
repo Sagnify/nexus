@@ -111,6 +111,7 @@ const api: ElectronAPI = {
   onScheduledEmailBrief: (callback: (target: { taskId: string; runId: string }) => void) => {
     const handler = (_event: any, target: { taskId: string; runId: string }) => callback(target);
     ipcRenderer.on('open-scheduled-email-brief', handler);
+    ipcRenderer.send('scheduled-email-brief-ready');
     return () => ipcRenderer.removeListener('open-scheduled-email-brief', handler);
   },
   resizeExcelCopilot: (hwnd: number, width: number, height: number) =>

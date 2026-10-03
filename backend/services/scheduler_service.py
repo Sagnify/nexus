@@ -21,6 +21,7 @@ from backend.database.repositories.scheduled_task_repo import ScheduledTaskRepos
 from backend.database.models import ScheduledTask, ScheduledTaskRun
 from backend.services.schedule_parser import calculate_next_run, get_safe_timezone
 from backend.services.notification_service import send_user_notification
+from backend.core.device_identity import get_device_id
 
 logger = logging.getLogger("nexus.scheduler")
 
@@ -28,7 +29,8 @@ logger = logging.getLogger("nexus.scheduler")
 class SchedulerService:
     def __init__(self, poll_interval_seconds: int = 15):
         self.poll_interval = poll_interval_seconds
-        self.worker_id = f"worker_{os.getpid()}_{uuid.uuid4().hex[:6]}"
+        self.device_id = get_device_id()
+        self.worker_id = f"{self.device_id[:8]}_{os.getpid()}_{uuid.uuid4().hex[:6]}"
         self._running = False
         self._loop_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
@@ -88,7 +90,7 @@ class SchedulerService:
                 if session is None:
                     return
                 repo = ScheduledTaskRepository(session)
-                due_tasks = await repo.get_due_tasks(now_utc)
+                due_tasks = await repo.get_due_tasks(now_utc, device_id=self.device_id)
                 if not due_tasks:
                     return
 
@@ -112,7 +114,7 @@ class SchedulerService:
             if session is None:
                 return
             repo = ScheduledTaskRepository(session)
-            task = await repo.get_by_id(task_id)
+            task = await repo.get_by_id(task_id, device_id=self.device_id)
             if not task or not task.enabled:
                 return
 
@@ -249,8 +251,12 @@ class SchedulerService:
         # 2. Pre-flight Connector Check
         required_connectors = exec_cfg.get("required_connectors", [])
         for conn_id in required_connectors:
-            token = credentials_store.get_token(str(task.user_id), conn_id)
-            if not token or not token.get("access_token"):
+            connector_creds = credentials_store.get_credential(str(task.user_id), conn_id)
+            has_auth = bool(
+                connector_creds
+                and any(connector_creds.get(key) for key in ("access_token", "token", "api_key"))
+            )
+            if not has_auth:
                 err_msg = f"Connector '{conn_id}' is required but disconnected. Re-authorize under Settings -> Connectors."
                 logger.warning("[Scheduler] Task '%s' blocked: %s", task.name, err_msg)
                 completed_at = datetime.datetime.now(datetime.timezone.utc)
@@ -467,7 +473,7 @@ class SchedulerService:
         """Manually trigger an immediate run of a scheduled task."""
         async with AsyncSessionLocal() as session:
             repo = ScheduledTaskRepository(session)
-            task = await repo.get_by_id(task_id, user_id=user_id)
+            task = await repo.get_by_id(task_id, user_id=user_id, device_id=self.device_id)
             if not task:
                 return None
 
@@ -488,7 +494,7 @@ class SchedulerService:
         """Handle immediate manual execution."""
         async with AsyncSessionLocal() as session:
             repo = ScheduledTaskRepository(session)
-            task = await repo.get_by_id(task_id)
+            task = await repo.get_by_id(task_id, device_id=self.device_id)
             run = await repo.get_run_by_id(run_id)
             if not task or not run:
                 return

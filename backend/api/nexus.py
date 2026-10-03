@@ -378,7 +378,8 @@ async def run_task(
         user
         and (
             (user.firebase_uid and not user.firebase_uid.startswith("guest_"))
-            or (user.email and user.email.lower().endswith("@nexus.desktop"))
+            or (user.firebase_uid and user.firebase_uid.startswith("local_device_"))
+            or (user.email and (user.email.lower().endswith("@nexus.desktop") or user.email.lower().endswith(".nexus.desktop")))
         )
     )
     user_id = str(user.id) if is_valid_user else None

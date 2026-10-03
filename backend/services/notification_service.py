@@ -68,8 +68,14 @@ async def send_user_notification(
                     json={"title": title, "message": message, "action": action},
                 )
                 delivered_by_electron = response.status_code == 200
+                if not delivered_by_electron:
+                    logger.warning(
+                        "Electron rejected actionable notification (%s): %s",
+                        response.status_code,
+                        response.text[:300],
+                    )
         except Exception as exc:
-            logger.debug("Electron notification bridge unavailable: %s", exc)
+            logger.warning("Electron notification bridge unavailable; brief alert will not be clickable: %s", exc)
 
     # 2. Native Windows Toast fallback. It is informational; Electron handles click actions.
     try:

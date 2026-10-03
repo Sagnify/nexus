@@ -2313,17 +2313,13 @@ async def _try_match_user_skill(state: NexusState, goal: str) -> Optional[dict]:
                     matched = await matcher.match_skill(raw_query, uid, db_session)
                     if not matched and goal and goal != raw_query:
                         matched = await matcher.match_skill(goal, uid, db_session)
-                    if not matched and uid != LOCAL_USER_ID:
-                        matched = await matcher.match_skill(raw_query, LOCAL_USER_ID, db_session)
-                        if not matched and goal and goal != raw_query:
-                            matched = await matcher.match_skill(goal, LOCAL_USER_ID, db_session)
 
                     if matched and not matched.is_ambiguous:
                         # Suppress legacy web-automation skills if a real API connector is active
                         skill_name_lower = (matched.skill.name or "").lower()
                         if any(w in skill_name_lower for w in ("email", "mail", "gmail")):
                             from backend.connectors.credentials_store import credentials_store
-                            if credentials_store.get_credential("default", "gmail") or credentials_store.get_credential(str(uid), "gmail"):
+                            if credentials_store.get_credential(str(uid), "gmail"):
                                 logger.info("[Planner] Suppressing legacy web-automation skill '%s' because Gmail API connector is connected.", matched.skill.name)
                                 matched = None
 

@@ -11,7 +11,20 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("nexus.connectors.credentials")
 
+from backend.core.device_identity import get_device_id
+import uuid
+
 CREDENTIALS_FILE = Path.home() / ".nexus" / "connector_credentials.json"
+_dev_id = get_device_id()
+_dev_user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"nexus-local-device-{_dev_id}"))
+
+_LOCAL_USER_KEYS = {
+    "default",
+    "local_default_user",
+    "00000000-0000-0000-0000-000000000001",
+    f"local_device_{_dev_id}",
+    _dev_user_id,
+}
 
 
 class ConnectorCredentialsStore:
@@ -46,19 +59,11 @@ class ConnectorCredentialsStore:
 
         # Preserve existing refresh_token if new payload does not contain one
         existing = data.get(user_key, {}).get(connector_id, {})
-        if not creds.get("refresh_token") and existing.get("refresh_token"):
-            creds["refresh_token"] = existing["refresh_token"]
+        stored_creds = dict(creds)
+        if not stored_creds.get("refresh_token") and existing.get("refresh_token"):
+            stored_creds["refresh_token"] = existing["refresh_token"]
 
-        data[user_key][connector_id] = creds
-
-        # Always mirror to default and local_default_user for seamless desktop daemon resolution
-        for mirror_key in ("default", "local_default_user"):
-            if mirror_key not in data:
-                data[mirror_key] = {}
-            mirror_existing = data.get(mirror_key, {}).get(connector_id, {})
-            if not creds.get("refresh_token") and mirror_existing.get("refresh_token"):
-                creds["refresh_token"] = mirror_existing["refresh_token"]
-            data[mirror_key][connector_id] = creds
+        data[user_key][connector_id] = stored_creds
 
         self._write(data)
 
@@ -72,17 +77,37 @@ class ConnectorCredentialsStore:
         if connector_id in user_creds:
             return user_creds[connector_id]
 
-        # 2. Check local desktop fallbacks
-        for fallback_key in ("local_default_user", "default"):
-            if fallback_key in data and connector_id in data[fallback_key]:
-                return data[fallback_key][connector_id]
-
-        # 3. Check any user namespace on this workstation
-        for k, v in data.items():
-            if isinstance(v, dict) and connector_id in v:
-                return v[connector_id]
+        # Local/guest aliases are one installation identity. Never fall back
+        # from an authenticated user to another user's credential namespace.
+        if user_key in _LOCAL_USER_KEYS:
+            for local_key in _LOCAL_USER_KEYS:
+                if connector_id in data.get(local_key, {}):
+                    return data[local_key][connector_id]
 
         return None
+
+    def has_user_credentials(self, user_id: str, connector_id: str) -> bool:
+        """Check one exact account namespace without local-alias fallback."""
+        data = self._read()
+        return connector_id in data.get(str(user_id or "default"), {})
+
+    def migrate_user_credentials(self, source_user_id: str, target_user_id: str) -> bool:
+        """Move credentials between two IDs only when auth resolved them to the same account."""
+        source_key = str(source_user_id or "")
+        target_key = str(target_user_id or "")
+        if not source_key or not target_key or source_key == target_key:
+            return False
+
+        data = self._read()
+        source = data.pop(source_key, None)
+        if not isinstance(source, dict):
+            return False
+
+        target = data.setdefault(target_key, {})
+        for connector_id, credentials in source.items():
+            target.setdefault(connector_id, credentials)
+        self._write(data)
+        return True
 
     def delete_credential(self, user_id: str, connector_id: str) -> bool:
         """Purge credentials when a connector is disconnected."""
@@ -90,20 +115,10 @@ class ConnectorCredentialsStore:
         user_key = str(user_id or "default")
         deleted = False
 
-        # Delete from requested user_key
-        if user_key in data and connector_id in data[user_key]:
-            del data[user_key][connector_id]
-            deleted = True
-
-        # Also purge from all fallbacks
-        for fb in ("default", "local_default_user"):
-            if fb in data and connector_id in data[fb]:
-                del data[fb][connector_id]
-                deleted = True
-
-        for k, v in list(data.items()):
-            if isinstance(v, dict) and connector_id in v:
-                del v[connector_id]
+        keys_to_delete = _LOCAL_USER_KEYS if user_key in _LOCAL_USER_KEYS else {user_key}
+        for key in keys_to_delete:
+            if connector_id in data.get(key, {}):
+                del data[key][connector_id]
                 deleted = True
 
         if deleted:

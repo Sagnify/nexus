@@ -21,6 +21,8 @@ const PILL_COLLAPSED_HEIGHT = 68;
 const PILL_TOP_Y = 20;
 let lastSyncedTaskState: any = null;
 let lastSyncedTeachState: any = null;
+let pendingEmailBriefTarget: { taskId: string; runId: string } | null = null;
+let mainRendererReady = false;
 
 // ---------------------------------------------------------------------------
 // Hotkeys that ACTUALLY work on Windows reliably (not intercepted by the OS):
@@ -92,6 +94,10 @@ function createSpotlightWindow() {
     if (input.key === 'F12' && input.type === 'keyDown') {
       mainWindow?.webContents.toggleDevTools();
     }
+  });
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    mainRendererReady = false;
   });
 
   // Hide on blur (click outside) ONLY for Spotlight window when no task is running
@@ -295,15 +301,14 @@ function startLoopbackServer() {
               body: String(payload.message || 'Click to review your email brief.').slice(0, 500),
             });
             notification.on('click', () => {
-              showWindow();
-              const deliver = () => mainWindow?.webContents.send('open-scheduled-email-brief', {
+              pendingEmailBriefTarget = {
                 taskId: String(action.task_id),
                 runId: String(action.run_id),
-              });
-              if (mainWindow?.webContents.isLoading()) {
-                mainWindow.webContents.once('did-finish-load', deliver);
-              } else {
-                deliver();
+              };
+              showWindow();
+              if (mainRendererReady && mainWindow && !mainWindow.webContents.isLoading()) {
+                mainWindow.webContents.send('open-scheduled-email-brief', pendingEmailBriefTarget);
+                pendingEmailBriefTarget = null;
               }
             });
             notification.show();
@@ -785,6 +790,15 @@ if (!gotTheLock) {
           pillWindow.moveTop();
           pillWindow.focus();
         }
+      }
+    });
+
+    ipcMain.on('scheduled-email-brief-ready', (event) => {
+      if (!mainWindow || event.sender !== mainWindow.webContents) return;
+      mainRendererReady = true;
+      if (pendingEmailBriefTarget) {
+        mainWindow.webContents.send('open-scheduled-email-brief', pendingEmailBriefTarget);
+        pendingEmailBriefTarget = null;
       }
     });
 

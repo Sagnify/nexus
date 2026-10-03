@@ -5,6 +5,7 @@ Enforces strict user ownership on every operation.
 """
 from __future__ import annotations
 import datetime
+import logging
 import uuid
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,6 +18,8 @@ from backend.database.session import get_db_session
 from backend.database.repositories.task_repo import TaskRepository
 from backend.core.privacy import normalize_task_category
 from backend.services.safety_filter import classify_query_safety
+
+logger = logging.getLogger("nexus.api.history")
 
 router = APIRouter()
 
