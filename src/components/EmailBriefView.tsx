@@ -61,7 +61,7 @@ export const EmailBriefView: React.FC<EmailBriefViewProps> = ({ taskId, runId, o
               setIsCached(true);
               setError(null);
             } catch (parseErr) {
-              console.warn('Failed to parse cached email brief', parseErr);
+              console.warn('Failed to parse cached email brief:', parseErr);
             }
           }
         }
