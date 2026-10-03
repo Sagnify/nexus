@@ -108,8 +108,18 @@ def extract_search_intent(goal: str, active_target: Optional[dict] = None) -> tu
     if m:
         q = m.group(1).strip()
         # Avoid hijacking local file / system searches
-        if not any(w in q for w in ("file", "folder", "desktop", "directory", "local", "pc", "computer", "disk")):
-            return "google", q, click_first
+        if any(w in q for w in ("file", "folder", "desktop", "directory", "local", "pc", "computer", "disk")):
+            return None
+        # Avoid hijacking web application actions, forms, documents, or automations (which belong to learned skills or agents)
+        app_action_words = (
+            "form", "forms", "survey", "gform", "doc", "docs", "sheet", "sheets",
+            "slide", "slides", "drive", "mail", "gmail", "calendar", "keep", "meet",
+            "create", "make", "build", "fill", "automate", "workflow", "recipe", "skill"
+        )
+        first_word = q.split()[0] if q.split() else ""
+        if any(first_word == w or q.startswith(w + " ") for w in app_action_words):
+            return None
+        return "google", q, click_first
 
     return None
 

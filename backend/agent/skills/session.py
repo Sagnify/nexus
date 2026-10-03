@@ -26,6 +26,7 @@ class DemonstrationEvent(BaseModel):
     value: Optional[str] = None
     key: Optional[str] = None
     is_sensitive: bool = False
+    snapshot: Optional[str] = None  # Base64 data URL interaction snapshot
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

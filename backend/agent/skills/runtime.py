@@ -105,11 +105,17 @@ class SkillRuntime:
         if not primary and text:
             primary = f"text={text}" if text.lower() != "button" else "button"
 
+        meta = st.get("metadata") or {}
+        vlm_feat = meta.get("vlm_features") or st.get("vlm_features") or bundle.get("vlm_features") or {}
+        if not text and vlm_feat.get("semantic_label"):
+            text = vlm_feat["semantic_label"]
+
         return {
             "selector": primary,
             "xpath": bundle.get("xpath") or st.get("xpath"),
             "text": text,
             "selector_bundle": bundle,
+            "vlm_features": vlm_feat,
         }
 
     def generate_plan_steps(self, match: MatchResult) -> list[PlanStep]:
@@ -181,12 +187,27 @@ class SkillRuntime:
             if p_name in ("recipient_email", "to_email", "email"):
                 prompt_q = "Who would you like to send this email to?"
                 placeholder_txt = "e.g. colleague@example.com"
-            elif p_name in ("subject", "title", "email_subject"):
+            elif p_name in ("subject", "email_subject"):
                 prompt_q = "What should the subject be?"
                 placeholder_txt = "e.g. Project Status Update"
+            elif p_name in ("form_title", "survey_title", "title"):
+                prompt_q = "What title would you like for this form?"
+                placeholder_txt = "e.g. Customer Feedback Survey"
+            elif p_name in ("question_1", "first_question", "question", "question_title"):
+                prompt_q = "What question would you like to add?"
+                placeholder_txt = "e.g. How satisfied are you with our service?"
+            elif p_name in ("question_2", "second_question"):
+                prompt_q = "What is the second question you would like to add?"
+                placeholder_txt = "e.g. Any additional comments or feedback?"
+            elif p_name in ("question_3", "third_question"):
+                prompt_q = "What is the next question?"
+                placeholder_txt = "e.g. Your contact email"
+            elif p_name in ("fields", "form_fields", "questions"):
+                prompt_q = "What questions or fields would you like on this form?"
+                placeholder_txt = "e.g. Name, Email, Feedback"
             elif p_name in ("body", "message", "content", "email_body"):
                 prompt_q = "What message would you like to send?"
-                placeholder_txt = "e.g. Hi team, here\u2019s the update\u2026"
+                placeholder_txt = "e.g. Hi team, here’s the update…"
             elif p_name in ("search_query", "query", "search_term"):
                 prompt_q = "What would you like to search for?"
                 placeholder_txt = "Type search terms\u2026"

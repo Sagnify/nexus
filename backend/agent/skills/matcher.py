@@ -73,10 +73,14 @@ class SkillMatcher:
         cleaned_norm = self._normalize_text(cleaned)
         bases = [cleaned_norm] if cleaned_norm else []
         # If trigger has trailing prepositions like 'to', 'for', 'on', also add variant without it
-        for prep in (" to", " for", " on", " with", " about"):
+        for prep in (" to", " for", " on", " with", " about", " in"):
             if cleaned_norm.endswith(prep):
                 bases.append(cleaned_norm[:-len(prep)].strip())
-        return [b for b in bases if b]
+        # If trigger has action prefixes like 'create', 'make', 'automate', also add noun phrase variant
+        for pfx in ("create ", "make ", "build ", "generate ", "automate ", "run ", "open "):
+            if cleaned_norm.startswith(pfx):
+                bases.append(cleaned_norm[len(pfx):].strip())
+        return list(dict.fromkeys([b for b in bases if b]))
 
     def _extract_parameters(
         self,
@@ -159,6 +163,16 @@ class SkillMatcher:
         if is_email_query and is_email_skill:
             best_score = max(best_score, 0.88)
 
+        # Form / Survey / Questionnaire domain boost
+        is_form_query = any(w in lower_q for w in ("form", "forms", "survey", "gform", "questionnaire", "quiz", "poll", "feedback"))
+        is_form_skill = (
+            any(w in (skill.name or "").lower() for w in ("form", "forms", "survey", "gform", "questionnaire"))
+            or any("forms" in s or "form" in s for s in target_sites)
+            or any(any(w in t.lower() for w in ("form", "forms", "survey", "gform")) for t in (skill.trigger_phrases or []))
+        )
+        if is_form_query and is_form_skill:
+            best_score = max(best_score, 0.90)
+
         # Search / browser site boost
         for site in target_sites:
             site_base = site.split(".")[0]
@@ -168,6 +182,8 @@ class SkillMatcher:
         # 5. Synonym / concept expansion boosts
         synonym_pairs = [
             ({"compose", "write", "draft"}, {"send", "email", "mail"}),
+            ({"create", "make", "build", "generate", "new", "fill", "complete", "submit", "automate"}, {"form", "forms", "survey", "quiz", "questionnaire", "poll"}),
+            ({"create", "make", "build", "generate", "write"}, {"doc", "document", "sheet", "spreadsheet", "presentation", "slides"}),
             ({"download", "export", "get", "fetch"}, {"report", "invoice", "receipt", "file"}),
             ({"open", "launch", "start"}, {"app", "application", "program"}),
             ({"search", "find", "lookup", "google"}, {"query", "web", "internet"}),
@@ -187,9 +203,9 @@ class SkillMatcher:
                 if t
             )
             if query_has_action and query_has_object and skill_has_action and skill_has_object:
-                best_score = max(best_score, 0.82)
+                best_score = max(best_score, 0.85)
             elif query_has_action and skill_has_action and (query_has_object or skill_has_object):
-                best_score = max(best_score, 0.70)
+                best_score = max(best_score, 0.72)
 
         return round(min(best_score, 1.0), 3)
 
@@ -240,7 +256,7 @@ class SkillMatcher:
                     operation="fast",
                     temperature=0.0,
                 ),
-                timeout=3.5,
+                timeout=5.5,
             )
 
             content = res.content if hasattr(res, "content") else str(res)
@@ -255,7 +271,7 @@ class SkillMatcher:
             conf = float(parsed.get("confidence", 0.0))
             extracted_params = parsed.get("extracted_parameters") or {}
 
-            if matched_id and conf >= 0.70:
+            if matched_id and conf >= 0.50:
                 for s in skills:
                     if str(s.id) == str(matched_id):
                         return s, conf, extracted_params
@@ -323,14 +339,14 @@ class SkillMatcher:
                             resolved_parameters=resolved_params,
                             missing_parameters=missing,
                         )
-                    elif norm_query.startswith(base):
+                    elif norm_query.startswith(base) or (len(base) >= 4 and (f" {base} " in f" {norm_query} " or base in norm_query)):
                         latest_version = skill.versions[0]
                         resolved_params, missing = self._extract_parameters(user_prompt, skill.parameters_schema or [])
-                        logger.info(f"[SkillMatcher] Base trigger prefix hit: '{skill.name}' (matched base '{base}')")
+                        logger.info(f"[SkillMatcher] Base trigger match: '{skill.name}' (matched base '{base}')")
                         return MatchResult(
                             skill=skill,
                             version=latest_version,
-                            confidence=0.92,
+                            confidence=0.94,
                             match_type="semantic_similarity",
                             resolved_parameters=resolved_params,
                             missing_parameters=missing,
@@ -342,7 +358,7 @@ class SkillMatcher:
             if not skill.versions:
                 continue
             score = self._score_semantic_similarity(user_prompt, skill)
-            if score >= 0.55:
+            if score >= 0.45:
                 scored_candidates.append((skill, score))
 
         if scored_candidates:

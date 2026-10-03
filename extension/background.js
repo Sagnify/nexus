@@ -27,10 +27,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request.action_summary) {
             recordedActionsHistory.push(request.action_summary);
         }
+        const ev = request.payload;
+        const isVisualAction = ev && ["click", "input", "change", "keydown"].includes(ev.event_type);
+        if (isVisualAction && chrome.tabs && chrome.tabs.captureVisibleTab) {
+            try {
+                chrome.tabs.captureVisibleTab(null, { format: "jpeg", quality: 40 }, (dataUrl) => {
+                    if (!chrome.runtime.lastError && dataUrl) {
+                        ev.snapshot = dataUrl;
+                    }
+                    wsSend({
+                        type: "teach_event",
+                        session_id: teachSessionId,
+                        event: ev
+                    });
+                });
+                return;
+            } catch (_) {}
+        }
         wsSend({
             type: "teach_event",
             session_id: teachSessionId,
-            event: request.payload
+            event: ev
         });
     } else if (request.type === "teach_action") {
         const sId = request.session_id || teachSessionId;

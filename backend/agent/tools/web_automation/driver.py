@@ -534,6 +534,9 @@ class BrowserAutomationEngine:
         xpath: str = "",
         timeout_ms: int = 5000,
         auto_dismiss_overlay: bool = True,
+        vlm_features: Optional[dict] = None,
+        selector_bundle: Optional[dict] = None,
+        **kwargs,
     ) -> dict:
         """
         Deterministic element click:
@@ -548,6 +551,8 @@ class BrowserAutomationEngine:
             let selector = {json.dumps(selector)};
             let text = {json.dumps(text)};
             let xpath = {json.dumps(xpath)};
+            let bundle = {json.dumps(selector_bundle or {})};
+            let vlm = {json.dumps(vlm_features or {})};
 
             let target = null;
             let candidates = [];
@@ -601,6 +606,33 @@ class BrowserAutomationEngine:
                         matching.sort((a, b) => (a.innerText?.length || 9999) - (b.innerText?.length || 9999));
                         target = matching[0];
                     }}
+                }}
+            }}
+
+            // 5. Selector Bundle Fallback
+            if (!target && bundle) {{
+                if (bundle.ariaLabel) {{
+                    try {{ target = document.querySelector(bundle.ariaLabel); }} catch (_) {{}}
+                }}
+                if (!target && bundle.testId) {{
+                    try {{ target = document.querySelector(`[data-testid="${{bundle.testId}}"]`); }} catch (_) {{}}
+                }}
+                if (!target && bundle.placeholder) {{
+                    try {{ target = document.querySelector(`[placeholder*="${{bundle.placeholder}}"]`); }} catch (_) {{}}
+                }}
+            }}
+
+            // 6. VLM Features Fallback
+            if (!target && vlm) {{
+                let sLabel = (vlm.semantic_label || "").toLowerCase().trim();
+                if (sLabel) {{
+                    let items = Array.from(document.querySelectorAll('button, a, [role=button], input, textarea, [tabindex]'));
+                    target = items.find(el => {{
+                        let a = (el.getAttribute('aria-label') || '').toLowerCase();
+                        let t = (el.getAttribute('title') || '').toLowerCase();
+                        let it = (el.innerText || el.textContent || '').toLowerCase();
+                        return a.includes(sLabel) || t.includes(sLabel) || it.includes(sLabel);
+                    }});
                 }}
             }}
 
@@ -719,6 +751,9 @@ class BrowserAutomationEngine:
         text: str,
         clear_first: bool = True,
         press_enter: bool = False,
+        vlm_features: Optional[dict] = None,
+        selector_bundle: Optional[dict] = None,
+        **kwargs,
     ) -> dict:
         """
         Type text into an input or textarea with full React/Vue change event dispatch.
@@ -730,6 +765,8 @@ class BrowserAutomationEngine:
             let text = {json.dumps(text)};
             let clearFirst = {json.dumps(clear_first)};
             let pressEnter = {json.dumps(press_enter)};
+            let bundle = {json.dumps(selector_bundle or {})};
+            let vlm = {json.dumps(vlm_features or {})};
 
             let el = document.querySelector(selector);
             if (!el) {{
@@ -743,6 +780,30 @@ class BrowserAutomationEngine:
                     el = document.querySelector('input[name="subjectbox"], input[aria-label*="Subject" i], input[placeholder*="Subject" i]');
                 }} else if (/body|message/i.test(selector)) {{
                     el = document.querySelector('div[role="textbox"][aria-label*="Message Body" i], div[contenteditable="true"][aria-label*="Body" i], div[g_editable="true"]');
+                }}
+            }}
+
+            if (!el && bundle) {{
+                if (bundle.ariaLabel) {{
+                    try {{ el = document.querySelector(bundle.ariaLabel); }} catch (_) {{}}
+                }}
+                if (!el && bundle.placeholder) {{
+                    try {{ el = document.querySelector(`[placeholder*="${{bundle.placeholder}}"]`); }} catch (_) {{}}
+                }}
+                if (!el && bundle.name) {{
+                    try {{ el = document.querySelector(bundle.name); }} catch (_) {{}}
+                }}
+            }}
+
+            if (!el && vlm) {{
+                let sLabel = (vlm.semantic_label || "").toLowerCase().trim();
+                if (sLabel) {{
+                    let inputs = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"]'));
+                    el = inputs.find(item => {{
+                        let a = (item.getAttribute('aria-label') || '').toLowerCase();
+                        let ph = (item.getAttribute('placeholder') || '').toLowerCase();
+                        return a.includes(sLabel) || ph.includes(sLabel);
+                    }});
                 }}
             }}
 

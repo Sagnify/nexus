@@ -688,20 +688,23 @@ if (!gotTheLock) {
       showWindow();
     });
 
-    ipcMain.on('window-resize', (_event, { width, height }: { width?: number; height: number; position?: string }) => {
+    ipcMain.on('window-resize', (_event, { width, height, position }: { width?: number; height: number; position?: string }) => {
       if (mainWindow) {
         const targetWidth = width || WINDOW_WIDTH;
-        const h = Math.min(Math.max(Math.ceil(height), 80), 960);
-        const currentBounds = mainWindow.getBounds();
-        if (currentBounds.width === targetWidth && Math.abs(currentBounds.height - h) <= 1) {
-          return; // Dimensions unchanged: prevent Win32 re-layout loops
-        }
         const primaryDisplay = screen.getPrimaryDisplay();
         const { width: screenWidth, height: screenHeight } = primaryDisplay.workAreaSize;
+        const maxH = Math.min(screenHeight - 30, 920);
+        const h = Math.min(Math.max(Math.ceil(height), 80), maxH);
+        const currentBounds = mainWindow.getBounds();
+        if (currentBounds.width === targetWidth && Math.abs(currentBounds.height - h) <= 1 && !position) {
+          return; // Dimensions unchanged: prevent Win32 re-layout loops
+        }
         const x = Math.round((screenWidth - targetWidth) / 2);
         let targetY = currentBounds.y;
-        if (targetY + h > screenHeight - 15) {
-          targetY = Math.max(20, screenHeight - h - 15);
+        if (position === 'center') {
+          targetY = Math.max(15, Math.round((screenHeight - h) / 2));
+        } else if (targetY + h > screenHeight - 15) {
+          targetY = Math.max(15, screenHeight - h - 15);
         }
         mainWindow.setBounds({ x, y: targetY, width: targetWidth, height: h }, false);
       }

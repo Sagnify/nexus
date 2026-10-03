@@ -168,6 +168,18 @@ const nexusTeachHUD = (() => {
 
     function generateSelectorBundle(element) {
         if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+        let rect = null;
+        try {
+            const r = element.getBoundingClientRect();
+            rect = {
+                x: Math.round(r.x),
+                y: Math.round(r.y),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+                top: Math.round(r.top),
+                left: Math.round(r.left)
+            };
+        } catch (_) {}
         return {
             testId: element.getAttribute("data-testid") || element.getAttribute("data-cy") || element.getAttribute("data-test") || null,
             ariaLabel: element.getAttribute("aria-label") ? `[aria-label="${element.getAttribute("aria-label").replace(/"/g, '\\"')}"]` : null,
@@ -176,7 +188,10 @@ const nexusTeachHUD = (() => {
             id: element.id && !element.id.match(/\d{4,}/) ? `#${element.id}` : null,
             cssPath: getCssSelector(element),
             xpath: getElementXPath(element),
-            textAnchor: (element.innerText || element.textContent || "").trim().slice(0, 40) || null
+            textAnchor: (element.innerText || element.textContent || "").trim().slice(0, 40) || null,
+            placeholder: element.placeholder || element.getAttribute("placeholder") || null,
+            title: element.title || element.getAttribute("title") || null,
+            boundingRect: rect
         };
     }
 
@@ -361,7 +376,7 @@ const nexusTeachHUD = (() => {
         lastClickTime = now;
         const target = e.target;
         if (!target || (hostEl && hostEl.contains(target))) return;
-        sendTeachEvent("click", target);
+        sendTeachEvent("click", target, { coords: { x: Math.round(e.clientX), y: Math.round(e.clientY) } });
         requestAnimationFrame(() => checkClientSideUrlChange());
     }
 
@@ -2512,18 +2527,71 @@ function findElementFast(selector, text, xpath) {
         }
     }
 
+    // 4. Selector Bundle Fallbacks (ariaLabel, placeholder, name, testId, boundingRect)
+    if (!target && selector_bundle) {
+        if (selector_bundle.ariaLabel) {
+            try { target = document.querySelector(selector_bundle.ariaLabel); } catch (_) {}
+        }
+        if (!target && selector_bundle.testId) {
+            try { target = document.querySelector(`[data-testid="${selector_bundle.testId}" i], [data-cy="${selector_bundle.testId}" i]`); } catch (_) {}
+        }
+        if (!target && selector_bundle.placeholder) {
+            try { target = document.querySelector(`[placeholder*="${selector_bundle.placeholder.replace(/"/g, '\\"')}" i]`); } catch (_) {}
+        }
+        if (!target && selector_bundle.name) {
+            try { target = document.querySelector(selector_bundle.name); } catch (_) {}
+        }
+        if (!target && selector_bundle.boundingRect) {
+            const b = selector_bundle.boundingRect;
+            if (typeof b.x === "number" && typeof b.y === "number") {
+                try {
+                    const cx = b.x + (b.width ? b.width / 2 : 5);
+                    const cy = b.y + (b.height ? b.height / 2 : 5);
+                    target = document.elementFromPoint(cx, cy);
+                } catch (_) {}
+            }
+        }
+    }
+
+    // 5. VLM Feature Fallbacks (semantic_label, visual_landmark, bounding_rect)
+    if (!target && vlm_features) {
+        const sLabel = (vlm_features.semantic_label || "").trim().toLowerCase();
+        if (sLabel) {
+            const candidates = Array.from(document.querySelectorAll(
+                'button, [role="button"], input, textarea, [contenteditable="true"], [role="textbox"], a, [role="link"], [role="option"], [role="tab"], div[title], span[title], [tabindex]'
+            ));
+            target = candidates.find(el => {
+                const aria = (el.getAttribute("aria-label") || "").trim().toLowerCase();
+                const title = (el.getAttribute("title") || "").trim().toLowerCase();
+                const ph = (el.getAttribute("placeholder") || "").trim().toLowerCase();
+                const inner = (el.innerText || el.textContent || "").trim().toLowerCase();
+                return (aria.includes(sLabel) || title.includes(sLabel) || ph.includes(sLabel) || inner.includes(sLabel)) && isVisible(el);
+            });
+        }
+        if (!target && vlm_features.bounding_rect) {
+            const r = vlm_features.bounding_rect;
+            if (typeof r.x === "number" && typeof r.y === "number") {
+                try {
+                    const cx = r.x + (r.width ? r.width / 2 : 5);
+                    const cy = r.y + (r.height ? r.height / 2 : 5);
+                    target = document.elementFromPoint(cx, cy);
+                } catch (_) {}
+            }
+        }
+    }
+
     return target;
 }
 
-async function waitForElement(selector, text, xpath, timeoutMs = 1500) {
+async function waitForElement(selector, text, xpath, timeoutMs = 1500, vlm_features = null, selector_bundle = null) {
     const start = Date.now();
-    let target = findElementFast(selector, text, xpath);
+    let target = findElementFast(selector, text, xpath, vlm_features, selector_bundle);
     if (target) return target;
 
     // Fast dynamic polling (resolves immediately as soon as element renders/mounts)
     while (Date.now() - start < timeoutMs) {
         await new Promise(r => setTimeout(r, 60));
-        target = findElementFast(selector, text, xpath);
+        target = findElementFast(selector, text, xpath, vlm_features, selector_bundle);
         if (target) return target;
     }
     return null;
@@ -2862,7 +2930,7 @@ const nexusVirtualCursor = (() => {
 })();
 
 async function clickElement(payload) {
-    const { selector, text, xpath, x: explicitX, y: explicitY } = payload || {};
+    const { selector, text, xpath, x: explicitX, y: explicitY, vlm_features, selector_bundle } = payload || {};
 
     // 0. Gmail Compose duplicate protection: if compose is already open, do not click compose again!
     const isComposeAction = (selector && /compose/i.test(selector)) || (text && /compose/i.test(text));
@@ -2887,8 +2955,8 @@ async function clickElement(payload) {
     let x = explicitX;
     let y = explicitY;
 
-    if (selector || text || xpath) {
-        target = await waitForElement(selector, text, xpath, 1500);
+    if (selector || text || xpath || vlm_features || selector_bundle) {
+        target = await waitForElement(selector, text, xpath, 1500, vlm_features, selector_bundle);
     }
 
     // Coordinate fallback: if target not found by selector/text, but coordinates provided or resolvable
@@ -3031,12 +3099,12 @@ async function secondaryCursorClick(payload) {
 }
 
 async function typeText(payload) {
-    const { selector, text, clear_first = true, press_enter = false } = payload;
+    const { selector, text, clear_first = true, press_enter = false, vlm_features, selector_bundle } = payload || {};
     let el = null;
     const composeBox = getActiveComposeContainer();
 
-    if (selector) {
-        el = await waitForElement(selector, null, null, 2500);
+    if (selector || vlm_features || selector_bundle) {
+        el = await waitForElement(selector, null, null, 2500, vlm_features, selector_bundle);
         // Fallbacks for common email & form inputs scoped to active compose box
         if (!el && (/\bto\b|recipient/i.test(selector || "") || /recipient/i.test(payload?.description || ""))) {
             const root = composeBox || document;

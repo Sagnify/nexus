@@ -440,6 +440,13 @@ async def stop_teach_session(
             session.prompt_intent or "Workflow",
         )
 
+        # Visual interaction feature extraction via VLM (extracts semantic landmarks & UI context without screen recordings)
+        try:
+            from backend.agent.skills.vlm_extractor import vlm_extractor
+            raw_events = await vlm_extractor.enrich_events(raw_events, session.prompt_intent)
+        except Exception as vlm_err:
+            logger.warning("[SkillCompiler] VLM feature enrichment skipped (non-blocking): %s", vlm_err)
+
         semantic_actions = semanticizer.semanticize_events(raw_events)
         if not semantic_actions:
             from backend.agent.skills.semanticizer import RawSemanticAction
@@ -481,7 +488,7 @@ async def stop_teach_session(
             len(draft_dict.get("parameters_schema", [])),
         )
 
-        # Validate step order and dependencies using AI
+        # AI Validation & Reordering Layer: validates causality, reorders if needed, prunes jitter
         from backend.agent.skills.step_validator import validator
         try:
             validation_result = await validator.validate_steps(
@@ -490,25 +497,30 @@ async def stop_teach_session(
                 auto_fix=True,
             )
             
-            # Add validation metadata to draft
+            # Apply validated and optimized step sequence
+            if validation_result.validated_steps:
+                logger.info(
+                    "[StepValidator] Applying perfected step sequence (%d steps, %d optimizations: %s)",
+                    len(validation_result.validated_steps),
+                    len(validation_result.optimizations_applied),
+                    ", ".join(validation_result.optimizations_applied) if validation_result.optimizations_applied else "order verified",
+                )
+                draft_dict["steps"] = validation_result.validated_steps
+            elif validation_result.corrected_steps:
+                draft_dict["steps"] = validation_result.corrected_steps
+
+            # Add validation metadata & optimization details to draft
             draft_dict["validation"] = {
                 "is_valid": validation_result.is_valid,
                 "issues": [issue.model_dump() for issue in validation_result.issues],
                 "confidence_score": validation_result.confidence_score,
                 "notes": validation_result.validation_notes,
+                "optimizations_applied": validation_result.optimizations_applied,
             }
-            
-            # If AI suggested corrections, use them
-            if validation_result.corrected_steps:
-                logger.info(
-                    "[StepValidator] Applying evidence-based reorder of %d recorded steps",
-                    len(validation_result.corrected_steps),
-                )
-                draft_dict["steps"] = validation_result.corrected_steps
             
             if validation_result.issues:
                 logger.info(
-                    "[StepValidator] Validation complete: %d issues found (confidence: %.2f)",
+                    "[StepValidator] Validation complete: %d issues noted (confidence: %.2f)",
                     len(validation_result.issues),
                     validation_result.confidence_score,
                 )
@@ -519,6 +531,7 @@ async def stop_teach_session(
                 "issues": [],
                 "confidence_score": 0.0,
                 "notes": f"Validation skipped: {str(val_exc)}",
+                "optimizations_applied": [],
             }
 
         # Non-blocking background persistence: immediately return draft so UI does not wait on DB network

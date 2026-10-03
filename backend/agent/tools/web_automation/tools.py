@@ -256,7 +256,7 @@ class BrowserClickTool(NexusTool):
         # 1. Extension Bridge (With In-Page Secondary Virtual Cursor)
         if await extension_bridge.wait_for_connection(timeout_seconds=2.0):
             try:
-                res = await extension_bridge.send_command("click_element", {"selector": selector, "text": text, "xpath": xpath}, timeout=5.0)
+                res = await extension_bridge.send_command("click_element", {"selector": selector, "text": text, "xpath": xpath, **kwargs}, timeout=5.0)
                 out_msg = f"Clicked '{res.get('text', text or selector)}' via NEXUS Extension (Secondary Virtual Cursor)."
                 if res.get("sent_confirmed"):
                     out_msg += f" Email send confirmed: {res.get('confirmation_message', 'Message sent')}."
@@ -276,7 +276,7 @@ class BrowserClickTool(NexusTool):
         engine = BrowserAutomationEngine.get_instance()
         if await _check_browser_running(engine):
             try:
-                res = await engine.click(selector=selector, text=text, xpath=xpath)
+                res = await engine.click(selector=selector, text=text, xpath=xpath, **kwargs)
                 elem_info = res.get("clicked_element", {})
                 output_msg = (
                     f"Clicked <{elem_info.get('tag', 'element')}> "
@@ -344,7 +344,7 @@ class BrowserTypeTool(NexusTool):
             try:
                 res = await extension_bridge.send_command(
                     "type_text",
-                    {"selector": selector, "text": text, "clear_first": clear_first, "press_enter": press_enter},
+                    {"selector": selector, "text": text, "clear_first": clear_first, "press_enter": press_enter, **kwargs},
                     timeout=5.0,
                 )
                 return ToolResult(
@@ -364,6 +364,7 @@ class BrowserTypeTool(NexusTool):
                     text=text,
                     clear_first=clear_first,
                     press_enter=press_enter,
+                    **kwargs,
                 )
                 return ToolResult(
                     success=True,

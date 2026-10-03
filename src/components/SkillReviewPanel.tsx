@@ -66,12 +66,42 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
   const [steps, setSteps] = useState<any[]>(draft.steps || []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [validationList, setValidationList] = useState(validationIssues);
 
   const parameters = draft.parameters_schema || [];
 
   useEffect(() => {
     if (saveError) setError(saveError);
   }, [saveError]);
+
+  useEffect(() => {
+    setValidationList(validationIssues);
+  }, [validationIssues]);
+
+  const handleAutoFixSteps = () => {
+    let reordered = [...steps];
+    const navIdx = reordered.findIndex((s) => s.action_type === "browser_navigate");
+    if (navIdx > 0) {
+      const [navStep] = reordered.splice(navIdx, 1);
+      reordered.unshift(navStep);
+    }
+    const pruned: any[] = [];
+    for (const step of reordered) {
+      if (pruned.length > 0) {
+        const prev = pruned[pruned.length - 1];
+        if (
+          prev.action_type === step.action_type &&
+          step.action_type === "browser_click" &&
+          (prev.selector_bundle?.cssPath === step.selector_bundle?.cssPath || prev.title === step.title)
+        ) {
+          continue;
+        }
+      }
+      pruned.push(step);
+    }
+    setSteps(pruned);
+    setValidationList([]);
+  };
 
   const handleAddTrigger = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -203,7 +233,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
 
   return (
     <div
-      className="w-full h-[640px] max-h-[640px] flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)]"
+      className="w-full h-[min(580px,calc(100vh-32px))] max-h-[min(580px,calc(100vh-32px))] flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)]"
       style={{
         background: "rgba(13, 14, 20, 0.98)",
         backdropFilter: "blur(32px) saturate(180%)",
@@ -259,16 +289,25 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       )}
 
       {/* ── VALIDATION ISSUES BANNER ── */}
-      {validationIssues.length > 0 && (
-        <div className="px-5 py-2.5 bg-amber-500/10 border-b border-amber-500/25 shrink-0">
-          <div className="flex items-center gap-2 mb-1.5">
-            <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span className="text-[11px] font-semibold text-amber-300 uppercase tracking-wider">
-              Step Validation Issues ({validationIssues.length})
-            </span>
+      {validationList.length > 0 && (
+        <div className="px-5 py-2 bg-amber-500/10 border-b border-amber-500/25 shrink-0">
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span className="text-[11px] font-semibold text-amber-300 uppercase tracking-wider">
+                Step Suggestions ({validationList.length})
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleAutoFixSteps}
+              className="px-2.5 py-0.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 text-[10px] font-semibold transition-all active:scale-95"
+            >
+              Auto-Fix & Reorder
+            </button>
           </div>
-          <div className="space-y-1.5 max-h-[90px] overflow-y-auto pr-1">
-            {validationIssues.map((issue, idx) => {
+          <div className="space-y-1 max-h-[70px] overflow-y-auto pr-1">
+            {validationList.map((issue, idx) => {
               const severityColor = {
                 error: "text-rose-300 bg-rose-500/10 border-rose-500/20",
                 warning: "text-amber-300 bg-amber-500/10 border-amber-500/20",
@@ -276,15 +315,10 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
               }[issue.severity] || "text-white/60 bg-white/5 border-white/10";
               
               return (
-                <div key={idx} className={`p-2 rounded-lg border text-[10px] ${severityColor}`}>
-                  <div className="font-semibold">
-                    Step {issue.step_index + 1}: {issue.title}
-                  </div>
-                  <div className="text-[9.5px] opacity-90 mt-0.5">{issue.description}</div>
+                <div key={idx} className={`p-1.5 rounded-lg border text-[10px] ${severityColor}`}>
+                  <span className="font-semibold">Step {issue.step_index + 1}: {issue.title}</span> — {issue.description}
                   {issue.suggestion && (
-                    <div className="text-[9.5px] opacity-75 mt-1 italic">
-                      💡 {issue.suggestion}
-                    </div>
+                    <span className="opacity-75 italic ml-1">💡 {issue.suggestion}</span>
                   )}
                 </div>
               );
@@ -451,7 +485,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       </div>
 
       {/* ── FOOTER ACTIONS ── */}
-      <div className="px-5 py-3.5 border-t border-white/[0.08] flex items-center justify-between bg-white/[0.02] shrink-0">
+      <div className="px-5 py-3 border-t border-white/[0.1] flex items-center justify-between bg-[#0e0f17] shrink-0 sticky bottom-0 z-20">
         <button
           type="button"
           onClick={onClose}

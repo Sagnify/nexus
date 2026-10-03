@@ -34,52 +34,63 @@ class StepValidationResult(BaseModel):
     issues: List[StepValidationIssue] = Field(default_factory=list)
     corrected_steps: Optional[List[Dict[str, Any]]] = None
     corrected_order: Optional[List[int]] = None
+    validated_steps: Optional[List[Dict[str, Any]]] = None
+    optimizations_applied: List[str] = Field(default_factory=list)
     confidence_score: float = 1.0  # 0.0 to 1.0
     validation_notes: str = ""
 
 
-STEP_VALIDATION_SYSTEM_PROMPT = """You are NEXUS Step Validator.
-Analyze a workflow's steps for logical order, dependencies, and execution feasibility.
+STEP_VALIDATION_SYSTEM_PROMPT = """You are NEXUS Step Validator & Workflow Optimizer.
+Analyze a demonstrated workflow's steps for logical causality, execution feasibility, and optimal order.
 
-Check for:
-1. ORDER ISSUES: Steps that should happen before others (e.g., navigate before click)
-2. DEPENDENCY ISSUES: Steps that depend on previous steps' outcomes
-3. PRECONDITION FAILURES: Steps that require elements/states that don't exist yet
-4. LOGIC ERRORS: Contradictory actions (e.g., navigate away then interact with previous page)
-5. PERFORMANCE: Unnecessary waits or redundant steps
+You will receive the recorded sequence of steps including:
+- step_index: original 0-based index
+- title: step title
+- action_type: browser_navigate | browser_click | browser_type | browser_select | etc.
+- url: target URL
+- selector_bundle: recorded selectors & attributes
+- vlm_features: rich visual features extracted from interaction snapshots (visual_role, semantic_label, visual_landmark, visual_context, expected_effect)
+- value: parameters or text entered
 
-For each issue found, provide:
-- step_index: 0-based index of problematic step
-- severity: "error" (breaks execution), "warning" (may fail), "info" (optimization)
-- issue_type: category of issue
-- title: short title
-- description: detailed explanation
-- suggestion: how to fix it
-- affected_steps: indices of related steps
+Validation & Optimization Tasks:
+1. ORDERING & CAUSALITY:
+   - Ensure browser_navigate to the destination site/app is strictly at step 0.
+   - For form/survey creation: establishing form title / metadata MUST precede creating questions.
+   - For interactive elements: clicking to focus an input or button MUST precede typing into it.
+   - Selecting dropdown options must follow clicking/opening the dropdown.
+   - Save / Submit / Send actions must happen AFTER all fields are populated.
+2. NOISE & JITTER REDUCTION:
+   - Identify rapid accidental double clicks on the same element and consolidate them.
+   - Flag clicks on blank background canvas or decorative non-functional elements that do not change state.
+3. PARAMETER & SELECTOR ROBUSTNESS:
+   - Verify each interactive step has reliable selectors and/or VLM semantic landmarks.
+   - Ensure parameter templates ({{param}}) match the intended data flow.
 
-Repairs must be evidence-based:
-- Use the complete sequence, workflow intent, observed URLs, and selectors together to infer the intended route.
-- If recorded steps are clearly out of order, return corrected_order as a permutation of the supplied step_index values.
-- Never invent a click, typed value, URL, selector, or completion action. Only reorder recorded steps.
-- If a required interaction or selector is absent, report an error and leave corrected_order null.
+Repair Instructions:
+- If recorded steps are out of order, return "corrected_order" as a permutation of the supplied step_index values (e.g. [0, 1, 3, 2, 4]).
+- List all optimizations performed in "optimizations_applied".
+- For any remaining warnings, detail them in "issues".
 
 Respond ONLY with valid JSON:
 {
   "is_valid": true/false,
+  "corrected_order": [0, 1, 2, ...],
+  "optimizations_applied": [
+    "Reordered navigation to step 0",
+    "Ordered form title before question generation"
+  ],
   "issues": [
     {
       "step_index": 0,
-      "severity": "error",
-      "issue_type": "order",
-      "title": "Click before navigate",
-      "description": "Step 1 tries to click element but page hasn't loaded yet",
-      "suggestion": "Add browser_navigate step before this click",
-      "affected_steps": [0, 1]
+      "severity": "info" | "warning" | "error",
+      "issue_type": "order" | "dependency" | "logic" | "performance",
+      "title": "Short title",
+      "description": "Explanation",
+      "suggestion": "Recommendation"
     }
   ],
-    "corrected_order": null or [1, 0, 2],
-  "confidence_score": 0.95,
-  "validation_notes": "Workflow is mostly valid but has 1 critical ordering issue"
+  "confidence_score": 0.98,
+  "validation_notes": "Summary of workflow validation state"
 }"""
 
 
@@ -117,17 +128,20 @@ class StepValidator:
                 return StepValidationResult(
                     is_valid=True,
                     issues=[],
+                    validated_steps=steps,
                     confidence_score=1.0,
                     validation_notes="Single valid step",
                 )
             
-            # If heuristic found critical issues, use AI for detailed analysis
-            if heuristic_issues or len(steps) > 3:
+            # If heuristic found critical issues or workflow has multiple steps, use AI for deep analysis & reordering
+            if heuristic_issues or len(steps) >= 2:
                 ai_result = await self._ai_validate_steps(steps, prompt_intent)
                 
                 # Merge heuristic and AI results
                 corrected = None
                 corrected_order = ai_result.corrected_order
+                optimizations = list(ai_result.optimizations_applied or [])
+
                 if (
                     auto_fix
                     and isinstance(corrected_order, list)
@@ -135,10 +149,19 @@ class StepValidator:
                     and sorted(corrected_order) == list(range(len(steps)))
                 ):
                     corrected = [steps[index] for index in corrected_order]
-                elif auto_fix and not corrected:
+                    if corrected != steps and not any("reorder" in str(opt).lower() for opt in optimizations):
+                        optimizations.append(f"AI reordered {len(steps)} steps into logical causal sequence")
+                elif auto_fix:
+                    corrected = self._heuristic_auto_fix(steps)
+                    if corrected:
+                        optimizations.append("Auto-repaired step order (normalized route to step 0)")
+
+                if not corrected and auto_fix:
                     corrected = self._heuristic_auto_fix(steps)
 
-                remaining_heuristic_issues = self._heuristic_validate(corrected) if corrected else heuristic_issues
+                final_steps = corrected or steps
+
+                remaining_heuristic_issues = self._heuristic_validate(final_steps)
                 ai_issues = [
                     issue for issue in ai_result.issues
                     if not (corrected and issue.issue_type == "order")
@@ -154,8 +177,10 @@ class StepValidator:
                     issues=unique_issues,
                     corrected_steps=corrected,
                     corrected_order=corrected_order,
+                    validated_steps=final_steps,
+                    optimizations_applied=optimizations,
                     confidence_score=ai_result.confidence_score,
-                    validation_notes=ai_result.validation_notes,
+                    validation_notes=ai_result.validation_notes or ("Steps validated and optimized" if is_valid else "Steps have potential issues"),
                 )
             else:
                 corrected = self._heuristic_auto_fix(steps) if auto_fix else None
@@ -167,6 +192,8 @@ class StepValidator:
                     is_valid=is_valid,
                     issues=remaining_issues,
                     corrected_steps=corrected,
+                    validated_steps=corrected or steps,
+                    optimizations_applied=["Auto-repaired step order"] if corrected else [],
                     confidence_score=0.95,
                     validation_notes="Validated with automated order repair",
                 )
@@ -184,45 +211,65 @@ class StepValidator:
         """Auto-repair obvious recorded order anomalies (e.g. navigation recorded after first interaction)."""
         if not steps:
             return None
-        has_browser_interaction = any(s.get("action_type") in ("browser_click", "browser_type", "browser_select") for s in steps)
-        if not has_browser_interaction:
-            return None
 
-        # If already starts with navigation, no order repair needed
-        if steps[0].get("action_type") == "browser_navigate":
-            return None
+        reordered = list(steps)
+        changed = False
 
-        # Case 1: Move navigation step to index 0
-        for idx in range(1, len(steps)):
-            if steps[idx].get("action_type") == "browser_navigate":
-                reordered = [steps[idx]] + [s for i, s in enumerate(steps) if i != idx]
-                logger.info("[StepValidator] Heuristically auto-fixed order: moved navigation step %d to index 0", idx)
-                return reordered
-
-        # Case 2: No navigation step recorded at all -> synthesize navigation to target URL at index 0
-        target_url = None
-        for step in steps:
-            u = step.get("url")
-            if u and (u.startswith("http://") or u.startswith("https://")):
-                target_url = u
+        # Case 1: Move navigation step to index 0 if it's anywhere else
+        nav_idx = -1
+        for idx, s in enumerate(reordered):
+            if s.get("action_type") == "browser_navigate":
+                nav_idx = idx
                 break
-        if target_url:
-            from urllib.parse import urlparse
-            import uuid
-            domain = urlparse(target_url).netloc
-            nav_step = {
-                "step_id": f"step-{uuid.uuid4().hex[:6]}",
-                "title": f"Open {domain or 'Target Site'}",
-                "action_type": "browser_navigate",
-                "execution_engine": "browser",
-                "url": target_url,
-                "preconditions": [],
-                "postconditions": [{"check_type": "url_contains", "target": domain}] if domain else [],
-            }
-            logger.info("[StepValidator] Auto-repaired missing route: prepended browser navigation to %s", target_url)
-            return [nav_step] + list(steps)
 
-        return None
+        if nav_idx > 0:
+            nav_step = reordered.pop(nav_idx)
+            reordered.insert(0, nav_step)
+            changed = True
+            logger.info("[StepValidator] Heuristically auto-fixed order: moved navigation step %d to index 0", nav_idx)
+        elif nav_idx == -1:
+            # Case 2: No navigation step recorded -> synthesize navigation to target URL at index 0
+            target_url = None
+            for step in reordered:
+                u = step.get("url") or (step.get("metadata") or {}).get("url")
+                if u and (u.startswith("http://") or u.startswith("https://")):
+                    target_url = u
+                    break
+            if target_url:
+                from urllib.parse import urlparse
+                import uuid
+                domain = urlparse(target_url).netloc
+                nav_step = {
+                    "step_id": f"step-{uuid.uuid4().hex[:6]}",
+                    "title": f"Open {domain or 'Target Site'}",
+                    "action_type": "browser_navigate",
+                    "execution_engine": "browser",
+                    "url": target_url,
+                    "preconditions": [],
+                    "postconditions": [{"check_type": "url_contains", "target": domain}] if domain else [],
+                }
+                reordered.insert(0, nav_step)
+                changed = True
+                logger.info("[StepValidator] Auto-repaired missing route: prepended browser navigation to %s", target_url)
+
+        # Case 3: Prune consecutive duplicate clicks (user click jitter)
+        pruned = []
+        for s in reordered:
+            if pruned:
+                prev = pruned[-1]
+                if (
+                    prev.get("action_type") == s.get("action_type") == "browser_click"
+                    and (
+                        (prev.get("selector_bundle") or {}).get("cssPath") == (s.get("selector_bundle") or {}).get("cssPath")
+                        or prev.get("title") == s.get("title")
+                    )
+                ):
+                    changed = True
+                    continue
+            pruned.append(s)
+        reordered = pruned
+
+        return reordered if changed else None
 
     def _heuristic_validate(self, steps: List[Dict[str, Any]]) -> List[StepValidationIssue]:
         """Fast heuristic validation without AI."""
@@ -235,23 +282,26 @@ class StepValidator:
             action_type = step.get("action_type", "").lower()
             url = step.get("url")
             selector = step.get("selector_bundle") or {}
-            
+            meta = step.get("metadata") or {}
+            vlm = meta.get("vlm_features") or step.get("vlm_features") or selector.get("vlm_features") or {}
+            has_vlm = bool(vlm.get("semantic_label") or vlm.get("visual_role") or vlm.get("visual_landmark"))
+
             # Reusable browser workflows must establish a route before interacting.
-            if action_type in ("browser_click", "browser_type", "browser_select") and not current_url:
+            if action_type in ("browser_click", "browser_type", "browser_select") and not current_url and idx == 0:
                 issues.append(
                     StepValidationIssue(
                         step_index=idx,
                         severity="warning",
                         issue_type="order",
                         title="Interaction before page navigation",
-                        description=f"Step {idx + 1} tries to {action_type} before a recorded page navigation",
+                        description=f"Workflow starts with {action_type} before a recorded page navigation",
                         suggestion="Auto-repair will prepend a navigation step to establish the starting page route",
                         affected_steps=[idx],
                     )
                 )
 
             selector_fields = ("testId", "ariaLabel", "role", "name", "id", "cssPath", "xpath", "textAnchor", "placeholder", "tag")
-            has_valid_selector = any(selector.get(field) for field in selector_fields) or bool(step.get("selector")) or bool(step.get("target_element"))
+            has_valid_selector = has_vlm or any(selector.get(field) for field in selector_fields) or bool(step.get("selector")) or bool(step.get("target_element"))
             if action_type in ("browser_click", "browser_type", "browser_select") and not has_valid_selector:
                 issues.append(
                     StepValidationIssue(
@@ -303,21 +353,26 @@ class StepValidator:
 
             step_context = []
             for idx, step in enumerate(steps):
+                meta = step.get("metadata") or {}
+                vlm = meta.get("vlm_features") or step.get("vlm_features") or {}
+                val = step.get("value_template") or step.get("value")
                 step_context.append({
                     "step_index": idx,
                     "title": step.get("title"),
                     "action_type": step.get("action_type"),
                     "execution_engine": step.get("execution_engine"),
                     "url": step.get("url"),
+                    "value": str(val)[:80] if val else None,
                     "selector_bundle": step.get("selector_bundle"),
+                    "vlm_features": vlm,
                     "parameter_references": step.get("parameter_references", []),
                 })
             user_prompt = (
                 f"Workflow Intent: {prompt_intent or 'Automated Task'}\n\n"
-                f"Recorded steps in observed order:\n{json.dumps(step_context, separators=(',', ':'))}\n\n"
-                "Analyze the whole route and step dependencies. Use URLs and selector bundles as evidence. "
-                "Return corrected_order only when a permutation of these exact indexes repairs the route. "
-                "Do not synthesize or alter steps, URLs, values, or selectors."
+                f"Recorded steps with visual & DOM context:\n{json.dumps(step_context, separators=(',', ':'))}\n\n"
+                "Analyze the whole workflow sequence, causality, and step dependencies. Use URLs, selector bundles, and VLM visual features as evidence. "
+                "Return corrected_order as an optimal permutation of step indexes to achieve the workflow intent without bugs. "
+                "List all optimizations applied."
             )
 
             logger.info(
@@ -371,10 +426,12 @@ class StepValidator:
             is_valid = parsed.get("is_valid", True)
             confidence = parsed.get("confidence_score", 0.8)
             notes = parsed.get("validation_notes", "")
+            optimizations = parsed.get("optimizations_applied", [])
 
             logger.info(
-                "[StepValidator] ✅ AI validation complete: %d issues found, confidence: %.2f",
+                "[StepValidator] ✅ AI validation complete: %d issues found, %d optimizations, confidence: %.2f",
                 len(issues),
+                len(optimizations),
                 confidence,
             )
 
@@ -382,6 +439,7 @@ class StepValidator:
                 is_valid=is_valid,
                 issues=issues,
                 corrected_order=parsed.get("corrected_order"),
+                optimizations_applied=optimizations,
                 confidence_score=confidence,
                 validation_notes=notes,
             )
