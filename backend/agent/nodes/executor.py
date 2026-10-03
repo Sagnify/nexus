@@ -301,9 +301,12 @@ async def _react_decide(
     plan_guide: list[dict],
     is_web_task: bool,
     current_idx: int = 0,
+    is_replay_mode: bool = False,
 ) -> dict:
     """
-    Core ReAct step: LLM observes current state and decides next action.
+    Core ReAct step: decides next action.
+    For skill replay and deterministic milestones, executes steps directly.
+    For unguided tasks or failed actions, falls back to live LLM ReAct observation.
     Returns {action, args, reasoning}.
     """
     if current_idx >= len(plan_guide):
@@ -316,59 +319,8 @@ async def _react_decide(
             return {"action": s.get("tool", "ai_response"), "args": s.get("args", {}), "reasoning": "No API key — using plan step directly"}
         return {"action": "goal_achieved", "args": {"summary": "All plan steps exhausted."}, "reasoning": ""}
 
-    # ── Deterministic Milestone Execution ────────────────────────────────────
-    # For non-browser, non-interactive deterministic tools (e.g. document, spreadsheet, system commands, media),
-    # execute the planned milestone directly! This keeps execution fast, deterministic,
-    # and completely immune to Groq TPM rate limits.
-    # CRITICAL: Browser interaction tools (click, type, select, scroll, wait, inspect, etc.) or interactive web tasks
-    # MUST ALWAYS flow through the ReAct loop so the agent observes the live page DOM, handles obstructive
-    # popups/dialogs, resolves dynamic selectors, and adapts like an intelligent pair programmer.
-    target_step = plan_guide[current_idx] if current_idx < len(plan_guide) else None
-    target_tool = target_step.get("tool", "") if target_step else ""
-    target_args = target_step.get("args", {}) if target_step else {}
-    last_action_failed = bool(history and (not history[-1].get("success", True) or history[-1].get("validation_passed") is False))
-
-    is_browser_interaction = (target_tool in BROWSER_TOOLS and target_tool != "browser_navigate")
-    is_interactive_task = is_web_task and target_tool in BROWSER_TOOLS and target_tool != "browser_navigate"
-    is_dialog_tool = target_tool in ("ask_user", "ai_response")
-
-    if target_tool and target_args and not last_action_failed and not is_browser_interaction and not is_interactive_task and not is_dialog_tool:
-        milestone_title = target_step.get("title") or target_tool
-        return {
-            "action": target_tool,
-            "args": target_args,
-            "reasoning": f"Advancing milestone: {milestone_title}",
-            "step_completed": False,
-        }
-
-    dom_text = _format_dom_for_llm(dom, goal) if is_web_task else "N/A — non-browser task"
-    history_text = _format_history(history)
-    
-    plan_lines = []
-    for i, s in enumerate(plan_guide):
-        if s.get("status") == "completed" or i < current_idx:
-            status_tag = "✓ [COMPLETED]"
-        elif i == current_idx:
-            status_tag = ">>> [CURRENT TARGET]"
-        else:
-            status_tag = "    [PENDING]"
-        plan_lines.append(f"  {status_tag} Step {i+1}: {s.get('title','?')} → {s.get('tool')}({json.dumps(s.get('args',{}))[:60]})")
-    plan_text = "\n".join(plan_lines) or "  (no plan — use judgment)"
-
-    user_msg = f"""GOAL: {goal}
-
-EXECUTION PLAN (focus on the CURRENT TARGET step, adapting to the live page):
-{plan_text}
-
-ACTIONS ALREADY TAKEN:
-{history_text}
-
-CURRENT LIVE PAGE STATE:
-{dom_text}
-
-Decide the single best NEXT action to advance the CURRENT TARGET step:"""
-
-    # Universal popup/modal dismissal check across ANY website
+    # ── Universal popup/modal dismissal check across ANY website ─────────────
+    # Must run before both deterministic replay and LLM ReAct so popups don't block actions!
     active_modal = dom.get("active_modal") if isinstance(dom, dict) else None
     if active_modal:
         modal_title = (active_modal.get("title") or "").lower()
@@ -377,7 +329,7 @@ Decide the single best NEXT action to advance the CURRENT TARGET step:"""
         user_wanted_modal = is_work_modal or any(k in goal_lower for k in ("open dialog", "open modal", "cookie settings", "view popup", "compose", "email", "mail", "send"))
 
         # Auto-dismiss if it's an intrusive blocking popup not explicitly requested
-        if not user_wanted_modal:
+        if not user_wanted_modal and active_modal.get("is_intrusive", False):
             # Count previous attempts to dismiss popups in history
             popup_attempts = sum(
                 1 for h in history
@@ -421,7 +373,76 @@ Decide the single best NEXT action to advance the CURRENT TARGET step:"""
                     "is_auxiliary": True,
                     "step_completed": False,
                 }
-            # If popup_attempts >= 3, do NOT loop further; proceed to page interaction or graceful fail.
+            # If popup_attempts >= 3, do NOT loop further; proceed to step execution.
+
+    # ── Deterministic Milestone Execution ────────────────────────────────────
+    target_step = plan_guide[current_idx] if current_idx < len(plan_guide) else None
+    target_tool = target_step.get("tool", "") if target_step else ""
+    target_args = target_step.get("args", {}) if target_step else {}
+    last_action_failed = bool(history and (not history[-1].get("success", True) or history[-1].get("validation_passed") is False))
+
+    is_skill_step = is_replay_mode or bool(
+        target_step and (
+            str(target_step.get("id", "")).startswith("skill-")
+            or "[Skill:" in str(target_step.get("description", ""))
+            or target_step.get("is_skill_step")
+            or bool(target_args.get("selector_bundle"))
+        )
+    ) or (bool(plan_guide) and any(str(s.get("id", "")).startswith("skill-") or "[Skill:" in str(s.get("description", "")) for s in plan_guide))
+
+    if target_tool and not last_action_failed:
+        milestone_title = target_step.get("title") or target_tool
+
+        # Skill replay fast-path: pre-compiled skill recipes execute directly with 0 LLM latency/TPM consumption
+        if is_skill_step:
+            logger.info("[Executor] Skill replay fast-path: executing step %d/%d '%s' directly", current_idx + 1, len(plan_guide), milestone_title)
+            return {
+                "action": target_tool,
+                "args": target_args,
+                "reasoning": f"[Skill Replay] Step {current_idx + 1}/{len(plan_guide)}: {milestone_title}",
+                "step_completed": False,
+            }
+
+        # Non-browser deterministic milestones for general plans
+        is_browser_interaction = (target_tool in BROWSER_TOOLS and target_tool != "browser_navigate")
+        is_interactive_task = is_web_task and target_tool in BROWSER_TOOLS and target_tool != "browser_navigate"
+        is_dialog_tool = target_tool in ("ask_user", "ai_response")
+
+        if not is_browser_interaction and not is_interactive_task and not is_dialog_tool:
+            return {
+                "action": target_tool,
+                "args": target_args,
+                "reasoning": f"Advancing milestone: {milestone_title}",
+                "step_completed": False,
+            }
+
+    # ── Live ReAct Perception & Planning (adaptive fallback / unguided tasks) ─
+    dom_text = _format_dom_for_llm(dom, goal) if is_web_task else "N/A — non-browser task"
+    history_text = _format_history(history)
+    
+    plan_lines = []
+    for i, s in enumerate(plan_guide):
+        if s.get("status") == "completed" or i < current_idx:
+            status_tag = "✓ [COMPLETED]"
+        elif i == current_idx:
+            status_tag = ">>> [CURRENT TARGET]"
+        else:
+            status_tag = "    [PENDING]"
+        plan_lines.append(f"  {status_tag} Step {i+1}: {s.get('title','?')} → {s.get('tool')}({json.dumps(s.get('args',{}))[:60]})")
+    plan_text = "\n".join(plan_lines) or "  (no plan — use judgment)"
+
+    user_msg = f"""GOAL: {goal}
+
+EXECUTION PLAN (focus on the CURRENT TARGET step, adapting to the live page):
+{plan_text}
+
+ACTIONS ALREADY TAKEN:
+{history_text}
+
+CURRENT LIVE PAGE STATE:
+{dom_text}
+
+Decide the single best NEXT action to advance the CURRENT TARGET step:"""
 
     try:
         from backend.agent.router.model_router import ainvoke_with_dynamic_switch
@@ -906,8 +927,32 @@ async def executor_node(state: NexusState) -> dict:
     if not initial_dom and is_web_task:
         initial_dom = dom_before
 
-    # 2. THINK: LLM decides next action based on real page state
-    decision = await _react_decide(goal, dom, history, plan, is_web_task, current_idx)
+    # Re-apply any parameters resolved in a prior graph iteration (survives checkpointing via resolved_params)
+    prior_params = state.get("resolved_params") or {}
+    if prior_params and current_idx < len(plan):
+        curr_step = plan[current_idx]
+        if curr_step.get("args") and isinstance(curr_step["args"], dict):
+            for k, v in list(curr_step["args"].items()):
+                if isinstance(v, str) and "{{" in v:
+                    for param_name, param_val in prior_params.items():
+                        v = v.replace(f"{{{{{param_name}}}}}", str(param_val))
+                    curr_step["args"][k] = v
+            if curr_step.get("title") and "{{" in curr_step["title"]:
+                for param_name, param_val in prior_params.items():
+                    curr_step["title"] = curr_step["title"].replace(f"{{{{{param_name}}}}}", str(param_val))
+            if curr_step.get("description") and "{{" in curr_step["description"]:
+                for param_name, param_val in prior_params.items():
+                    curr_step["description"] = curr_step["description"].replace(f"{{{{{param_name}}}}}", str(param_val))
+
+    # Detect if we're executing a learned/pre-compiled skill
+    is_replay = bool(
+        state.get("is_replay_mode")
+        or state.get("skill_id")
+        or (plan and any(str(s.get("id", "")).startswith("skill-") or "[Skill:" in str(s.get("description", "")) for s in plan))
+    )
+
+    # 2. THINK: decides next action based on real page state (or fast-paths skill steps)
+    decision = await _react_decide(goal, dom, history, plan, is_web_task, current_idx, is_replay_mode=is_replay)
 
     action = decision.get("action", "cannot_proceed")
     args = decision.get("args", {})
@@ -979,6 +1024,32 @@ async def executor_node(state: NexusState) -> dict:
                 action = s.get("tool", "browser_wait")
                 args = s.get("args", {})
                 reasoning = f"Continuing planned milestone: {s.get('title')}"
+        elif is_replay and (current_idx >= len(plan) or not pending_plan_steps):
+            # In skill replay: all planned actions executed cleanly to completion
+            asyncio.create_task(_fire_overlay("automation_stop"))
+            summary = args.get("summary") or f"All {len(plan)} skill steps for '{goal}' executed successfully."
+            observations.append(f"[Skill Replay] [Confirmed] {summary}")
+            for s in plan:
+                if s.get("status") != "completed":
+                    s["status"] = "completed"
+                    if not s.get("result"):
+                        s["result"] = "Completed successfully."
+            return {
+                "plan": plan,
+                "tool_calls": tool_calls,
+                "tool_results": tool_results,
+                "observations": observations,
+                "execution_history": history,
+                "goal_achieved": True,
+                "initial_dom": initial_dom,
+                "execution_status": "completed",
+                "final_response": summary,
+                "spoken_response": await generate_spoken_brief(goal, user_input, plan, execution_status="completed", final_response=summary),
+                "is_replay_mode": state.get("is_replay_mode"),
+                "skill_id": state.get("skill_id"),
+                "skill_version": state.get("skill_version"),
+                "resolved_params": state.get("resolved_params") or {},
+            }
         else:
             # ── Full goal validation: LLM + VLM dual-confirmation ──────────────
             val_msg = "Taking screenshot & verifying goal with VLM…"
@@ -1218,6 +1289,14 @@ async def executor_node(state: NexusState) -> dict:
         if dom_diff_val is not None and dom_diff_val.passed:
             # Confirmed directly by live DOM inspection — skip screenshot & VLM delays!
             val = dom_diff_val
+        elif is_replay and success and (dom_diff_val is None or dom_diff_val.passed):
+            # In skill replay: tool succeeded and DOM diff didn't explicitly fail — skip wasteful Groq VLM delays!
+            val = ValidationResult(
+                passed=True,
+                confidence=0.95,
+                reason=f"[Skill Replay] Action '{action}' completed successfully.",
+                tier="skill_replay",
+            )
         else:
             # Ambiguous or failed DOM diff — fallback to screenshot + VLM validation
             screenshot_bytes: Optional[bytes] = None
@@ -1530,4 +1609,8 @@ async def executor_node(state: NexusState) -> dict:
         "initial_dom": initial_dom,
         "execution_status": "completed" if is_goal_done else "observing",
         "verification_retries": verification_retries,
+        "is_replay_mode": state.get("is_replay_mode"),
+        "skill_id": state.get("skill_id"),
+        "skill_version": state.get("skill_version"),
+        "resolved_params": state.get("resolved_params") or {},
     }
