@@ -636,6 +636,71 @@ async def request_user_input(
     return str(val)
 
 
+@router.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    """
+    Transcribes audio WAV file via Groq Whisper Turbo and checks for wake word.
+    Returns:
+        text: full transcript
+        wake_detected: boolean whether wake word was detected ('hey nexus', 'nexus', etc.)
+        command: the actionable command text after the wake word
+        error: error detail if transcription failed
+    """
+    try:
+        audio_bytes = await file.read()
+        if not audio_bytes:
+            return {"text": "", "wake_detected": False, "command": "", "error": "Empty audio file received"}
+
+        import re
+        from backend.core.config import get_groq_api_key
+        api_key = get_groq_api_key()
+        if not api_key:
+            return {"text": "", "wake_detected": False, "command": "", "error": "Groq API key not configured"}
+
+        from groq import Groq
+        client = Groq(api_key=api_key)
+
+        text = ""
+        transcription_err = None
+        for model in ("whisper-large-v3-turbo", "whisper-large-v3"):
+            try:
+                transcription = await asyncio.to_thread(
+                    client.audio.transcriptions.create,
+                    file=("audio.wav", audio_bytes, "audio/wav"),
+                    model=model,
+                    response_format="json",
+                    language="en",
+                    temperature=0.0,
+                )
+                text = (getattr(transcription, "text", "") or "").strip()
+                if text:
+                    break
+            except Exception as e:
+                transcription_err = str(e)
+                logger.warning(f"[STT] Groq transcription with {model} failed: {e}")
+
+        if not text and transcription_err:
+            return {"text": "", "wake_detected": False, "command": "", "error": transcription_err}
+
+        wake_detected = False
+        command = text
+        # Detect "hey nexus", "hi nexus", "hello nexus", "ok nexus", "okay nexus", or just "nexus"
+        match = re.match(r"^\s*(?:hey|hi|hello|ok|okay)?\s*nexus\b[,\s:!-]*", text, re.IGNORECASE)
+        if match:
+            wake_detected = True
+            command = text[match.end():].strip()
+            command = re.sub(r"^[,:\s!-]+", "", command).strip()
+
+        return {
+            "text": text,
+            "wake_detected": wake_detected,
+            "command": command,
+        }
+    except Exception as exc:
+        logger.error(f"[STT] Transcription endpoint error: {exc}", exc_info=True)
+        return {"text": "", "wake_detected": False, "command": "", "error": str(exc)}
+
+
 @router.post("/input")
 @router.post("/input/{task_id}")
 async def submit_user_input(submission: UserInputSubmission, task_id: Optional[str] = None):

@@ -305,6 +305,11 @@ export function useVoiceInput({
 
         if (wavBlob.size > 2000) {
           const res = await transcribeAudioBlob(wavBlob);
+          // If Spotlight window was closed or hidden during transcription, discard immediately!
+          if (!isWindowOpenRef.current) {
+            console.log('[Voice:Wake] Spotlight window closed during inspection — discarding wake word');
+            return;
+          }
           if (res.wake_detected) {
             console.log('[Voice] Wake word confirmed! Payload:', res.command);
             setWakeWordDetected(true);

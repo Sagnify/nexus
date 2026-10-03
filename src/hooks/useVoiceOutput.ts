@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { cleanSpokenSentence } from '../utils/speechUtils';
 
-const BACKEND_URL = 'http://localhost:8000';
+const BACKEND_URL = 'http://127.0.0.1:8000';
 
 export interface VoiceOption {
   id: string;
