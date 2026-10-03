@@ -471,19 +471,6 @@ class SkillCompiler:
             )
             compiled_steps.append(step)
 
-        if not compiled_steps:
-            compiled_steps.append(
-                CompiledStepSchema(
-                    step_id=f"step-{uuid.uuid4().hex[:6]}",
-                    title="Perform Workflow Action",
-                    action_type="browser_navigate",
-                    execution_engine="browser",
-                    url="https://google.com",
-                    preconditions=[],
-                    postconditions=[],
-                )
-            )
-
         # Extract target sites & applications from demonstration actions
         extracted_sites: List[str] = []
         for act in filtered_actions:
@@ -503,6 +490,46 @@ class SkillCompiler:
 
         primary_site = extracted_sites[0] if extracted_sites else None
         starting_url = filtered_actions[0].url if (filtered_actions and filtered_actions[0].url) else None
+
+        # Ensure browser workflow establishes starting route at step 0
+        has_browser_interaction = any(s.execution_engine == "browser" and s.action_type in ("browser_click", "browser_type", "browser_select", "browser_press") for s in compiled_steps)
+        if has_browser_interaction and compiled_steps:
+            nav_idx = next((i for i, s in enumerate(compiled_steps) if s.action_type == "browser_navigate"), None)
+            if nav_idx is not None and nav_idx > 0:
+                nav_step = compiled_steps.pop(nav_idx)
+                compiled_steps.insert(0, nav_step)
+            elif nav_idx is None:
+                target_url = None
+                for act in filtered_actions:
+                    if act.url and (act.url.startswith("http://") or act.url.startswith("https://")):
+                        target_url = act.url
+                        break
+                if not target_url and extracted_sites:
+                    target_url = f"https://{extracted_sites[0]}"
+                if target_url:
+                    from urllib.parse import urlparse
+                    domain = urlparse(target_url).netloc
+                    compiled_steps.insert(0, CompiledStepSchema(
+                        step_id=f"step-{uuid.uuid4().hex[:6]}",
+                        title=f"Open {domain or 'Target Page'}",
+                        action_type="browser_navigate",
+                        execution_engine="browser",
+                        url=target_url,
+                        postconditions=[ConditionSchema(check_type="url_contains", target=domain)] if domain else [],
+                    ))
+
+        if not compiled_steps:
+            compiled_steps.append(
+                CompiledStepSchema(
+                    step_id=f"step-{uuid.uuid4().hex[:6]}",
+                    title="Perform Workflow Action",
+                    action_type="browser_navigate",
+                    execution_engine="browser",
+                    url="https://google.com",
+                    preconditions=[],
+                    postconditions=[],
+                )
+            )
 
         workflow_preconditions: List[ConditionSchema] = []
         if primary_site:
@@ -744,6 +771,31 @@ class SkillCompiler:
                     metadata=orig_act.metadata if orig_act else {},
                 )
                 compiled_steps.append(compiled_step)
+
+            # Ensure distilled browser workflow establishes starting route at step 0
+            has_browser_interaction = any(s.execution_engine == "browser" and s.action_type in ("browser_click", "browser_type", "browser_select", "browser_press") for s in compiled_steps)
+            if has_browser_interaction and compiled_steps:
+                nav_idx = next((i for i, s in enumerate(compiled_steps) if s.action_type == "browser_navigate"), None)
+                if nav_idx is not None and nav_idx > 0:
+                    nav_step = compiled_steps.pop(nav_idx)
+                    compiled_steps.insert(0, nav_step)
+                elif nav_idx is None:
+                    target_url = None
+                    for act in raw_actions:
+                        if act.url and (act.url.startswith("http://") or act.url.startswith("https://")):
+                            target_url = act.url
+                            break
+                    if target_url:
+                        from urllib.parse import urlparse
+                        domain = urlparse(target_url).netloc
+                        compiled_steps.insert(0, CompiledStepSchema(
+                            step_id=f"step-{uuid.uuid4().hex[:6]}",
+                            title=f"Open {domain or 'Target Page'}",
+                            action_type="browser_navigate",
+                            execution_engine="browser",
+                            url=target_url,
+                            postconditions=[ConditionSchema(check_type="url_contains", target=domain)] if domain else [],
+                        ))
 
             # Parameters schema
             params_schema: List[ParameterDefinition] = []

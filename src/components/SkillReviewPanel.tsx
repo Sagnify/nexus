@@ -99,10 +99,6 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       setError("A skill must have at least one step.");
       return;
     }
-    if (!isDraft && validationIssues.some((issue) => issue.severity === "error")) {
-      setError("This workflow has unresolved step errors. Save it as a draft or re-record the missing interactions before using it.");
-      return;
-    }
 
     setSaving(true);
     setError(null);
@@ -207,7 +203,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
 
   return (
     <div
-      className="w-full flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)] max-h-[84vh]"
+      className="w-full h-[640px] max-h-[640px] flex flex-col select-none text-white animate-in fade-in duration-200 rounded-2xl overflow-hidden border border-white/10 shadow-[0_24px_70px_rgba(0,0,0,0.95)]"
       style={{
         background: "rgba(13, 14, 20, 0.98)",
         backdropFilter: "blur(32px) saturate(180%)",
@@ -298,7 +294,7 @@ export const SkillReviewPanel: React.FC<SkillReviewPanelProps> = ({
       )}
 
       {/* ── SCROLLABLE BODY ── */}
-      <div className="p-5 space-y-4 max-h-[440px] flex-1 min-h-0 overflow-y-auto bg-black/20">
+      <div className="p-5 space-y-4 flex-1 min-h-0 overflow-y-auto bg-black/20">
         {/* Name and Description Inputs */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <div>

@@ -349,15 +349,15 @@ async def run_task(
         cur_target = {"id": "antigravity", "application": "Antigravity", "target_type": "antigravity"}
         cur_context = {}
 
-    # A caller must never choose the skill owner. Guests may run general tasks,
-    # but do not receive a user_id and therefore cannot match saved skills.
-    is_registered_user = bool(
+    # Registered users and local desktop users receive a user_id to match saved skills.
+    is_valid_user = bool(
         user
-        and user.firebase_uid
-        and not user.firebase_uid.startswith("guest_")
-        and not (user.email or "").lower().endswith("@nexus.desktop")
+        and (
+            (user.firebase_uid and not user.firebase_uid.startswith("guest_"))
+            or (user.email and user.email.lower().endswith("@nexus.desktop"))
+        )
     )
-    user_id = str(user.id) if is_registered_user else None
+    user_id = str(user.id) if is_valid_user else None
 
     # Resolve user display name for email sign-offs and personalization
     import re

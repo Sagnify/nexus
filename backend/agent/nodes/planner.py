@@ -2294,6 +2294,9 @@ async def planner_node(state: NexusState) -> dict:
                     from backend.agent.skills.matcher import matcher
                     from backend.agent.skills.runtime import runtime
                     matched = await matcher.match_skill(goal or state.get("user_input", ""), uid, db_session)
+                    if not matched and uid != LOCAL_USER_ID:
+                        matched = await matcher.match_skill(goal or state.get("user_input", ""), LOCAL_USER_ID, db_session)
+
                     if matched and not matched.is_ambiguous:
                         # Suppress legacy web-automation skills if a real API connector is active
                         skill_name_lower = (matched.skill.name or "").lower()

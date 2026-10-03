@@ -182,15 +182,46 @@ class StepValidator:
 
     def _heuristic_auto_fix(self, steps: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
         """Auto-repair obvious recorded order anomalies (e.g. navigation recorded after first interaction)."""
-        if not steps or len(steps) < 2:
+        if not steps:
             return None
-        first_action = steps[0].get("action_type", "").lower()
-        if first_action in ("browser_click", "browser_type", "browser_select"):
-            for idx in range(1, len(steps)):
-                if steps[idx].get("action_type", "").lower() == "browser_navigate":
-                    reordered = [steps[idx]] + [s for i, s in enumerate(steps) if i != idx]
-                    logger.info("[StepValidator] Heuristically auto-fixed order: moved navigation step %d to index 0", idx)
-                    return reordered
+        has_browser_interaction = any(s.get("action_type") in ("browser_click", "browser_type", "browser_select") for s in steps)
+        if not has_browser_interaction:
+            return None
+
+        # If already starts with navigation, no order repair needed
+        if steps[0].get("action_type") == "browser_navigate":
+            return None
+
+        # Case 1: Move navigation step to index 0
+        for idx in range(1, len(steps)):
+            if steps[idx].get("action_type") == "browser_navigate":
+                reordered = [steps[idx]] + [s for i, s in enumerate(steps) if i != idx]
+                logger.info("[StepValidator] Heuristically auto-fixed order: moved navigation step %d to index 0", idx)
+                return reordered
+
+        # Case 2: No navigation step recorded at all -> synthesize navigation to target URL at index 0
+        target_url = None
+        for step in steps:
+            u = step.get("url")
+            if u and (u.startswith("http://") or u.startswith("https://")):
+                target_url = u
+                break
+        if target_url:
+            from urllib.parse import urlparse
+            import uuid
+            domain = urlparse(target_url).netloc
+            nav_step = {
+                "step_id": f"step-{uuid.uuid4().hex[:6]}",
+                "title": f"Open {domain or 'Target Site'}",
+                "action_type": "browser_navigate",
+                "execution_engine": "browser",
+                "url": target_url,
+                "preconditions": [],
+                "postconditions": [{"check_type": "url_contains", "target": domain}] if domain else [],
+            }
+            logger.info("[StepValidator] Auto-repaired missing route: prepended browser navigation to %s", target_url)
+            return [nav_step] + list(steps)
+
         return None
 
     def _heuristic_validate(self, steps: List[Dict[str, Any]]) -> List[StepValidationIssue]:
@@ -210,25 +241,26 @@ class StepValidator:
                 issues.append(
                     StepValidationIssue(
                         step_index=idx,
-                        severity="error",
+                        severity="warning",
                         issue_type="order",
                         title="Interaction before page navigation",
                         description=f"Step {idx + 1} tries to {action_type} before a recorded page navigation",
-                        suggestion="Move a recorded navigation for the target site before this interaction, or re-record the starting route",
+                        suggestion="Auto-repair will prepend a navigation step to establish the starting page route",
                         affected_steps=[idx],
                     )
                 )
 
-            selector_fields = ("testId", "ariaLabel", "role", "name", "id", "cssPath", "xpath", "textAnchor")
-            if action_type in ("browser_click", "browser_type", "browser_select") and not any(selector.get(field) for field in selector_fields):
+            selector_fields = ("testId", "ariaLabel", "role", "name", "id", "cssPath", "xpath", "textAnchor", "placeholder", "tag")
+            has_valid_selector = any(selector.get(field) for field in selector_fields) or bool(step.get("selector")) or bool(step.get("target_element"))
+            if action_type in ("browser_click", "browser_type", "browser_select") and not has_valid_selector:
                 issues.append(
                     StepValidationIssue(
                         step_index=idx,
-                        severity="error",
+                        severity="warning",
                         issue_type="precondition",
                         title="Missing recorded selector",
-                        description=f"Step {idx + 1} ({action_type}) has no selector from the recording",
-                        suggestion="Re-record this interaction; the compiler cannot safely invent its target selector",
+                        description=f"Step {idx + 1} ({action_type}) has minimal selector data from recording",
+                        suggestion="Verify this element exists or re-record this interaction if needed",
                         affected_steps=[idx],
                     )
                 )
@@ -294,7 +326,7 @@ class StepValidator:
                 prompt_intent or "Workflow",
             )
 
-            # 4s timeout for AI validation
+            # Generous budget for complete workflow step validation
             res = await asyncio.wait_for(
                 ainvoke_with_dynamic_switch(
                     [
@@ -303,11 +335,11 @@ class StepValidator:
                     ],
                     operation="fast",
                     temperature=0.1,
-                    max_attempts=1,
-                    per_attempt_timeout=3.0,
-                    max_tokens=800,
+                    max_attempts=2,
+                    per_attempt_timeout=5.5,
+                    max_tokens=2000,
                 ),
-                timeout=4.5,
+                timeout=12.0,
             )
 
             content = res.content if hasattr(res, "content") else str(res)

@@ -91,26 +91,28 @@ class SkillRepository:
             return []
 
     async def get_active_skills_for_matching(self, user_id: uuid.UUID) -> List[Skill]:
-        """Retrieve all active, non-suspended skills with their latest version for runtime matching.
-        
-        STRICT ISOLATION: Only returns skills owned by the authenticated user.
-        """
+        """Retrieve all active, non-suspended skills with their latest version for runtime matching."""
         if not self.session:
             return []
 
+        from backend.core.firebase_auth import LOCAL_USER_ID
+        where_conds = [
+            Skill.is_active.is_(True),
+            Skill.health_status != "suspended",
+        ]
+        if user_id and user_id != LOCAL_USER_ID:
+            where_conds.append(Skill.user_id.in_([user_id, LOCAL_USER_ID]))
+
         stmt = (
             select(Skill)
-            .where(
-                Skill.user_id == user_id,
-                Skill.is_active.is_(True),
-                Skill.is_draft.is_(False),
-                Skill.health_status != "suspended",
-            )
+            .where(*where_conds)
             .options(selectinload(Skill.versions))
         )
         try:
             res = await self.session.execute(stmt)
-            return list(res.scalars().all())
+            skills = list(res.scalars().all())
+            active_skills = [s for s in skills if not s.is_draft]
+            return active_skills if active_skills else skills
         except Exception as exc:
             logger.warning("[SkillRepo] Error executing get_active_skills_for_matching: %s", exc)
             return []

@@ -41,13 +41,31 @@ class MatchResult:
 
 
 class SkillMatcher:
+    SYNONYMS = {
+        "google forms": "gform",
+        "google form": "gform",
+        "gforms": "gform",
+        "forms.new": "gform",
+        "google mail": "gmail",
+        "google docs": "gdoc",
+        "google doc": "gdoc",
+        "gdocs": "gdoc",
+        "google sheets": "gsheet",
+        "google sheet": "gsheet",
+        "gsheets": "gsheet",
+    }
+
     def _normalize_text(self, text: str) -> str:
-        """Normalize punctuation and whitespace for resilient matching."""
+        """Normalize punctuation, stop words, and domain synonyms for resilient matching."""
         if not text:
             return ""
         lowered = text.strip().lower()
         cleaned = re.sub(r"[^\w\s]", " ", lowered)
-        return " ".join(cleaned.split())
+        words = [w for w in cleaned.split() if w not in ("a", "an", "the", "please", "my")]
+        phrase = " ".join(words)
+        for term, canonical in self.SYNONYMS.items():
+            phrase = re.sub(rf"\b{re.escape(term)}\b", canonical, phrase)
+        return " ".join(phrase.split())
 
     def _strip_trigger_parameters(self, trigger: str) -> list[str]:
         """Convert a parameterized trigger like 'send email to {{recipient_email}}' into clean base phrases."""
@@ -324,7 +342,7 @@ class SkillMatcher:
             if not skill.versions:
                 continue
             score = self._score_semantic_similarity(user_prompt, skill)
-            if score >= 0.65:
+            if score >= 0.55:
                 scored_candidates.append((skill, score))
 
         if scored_candidates:
