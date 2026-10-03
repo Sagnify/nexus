@@ -139,18 +139,29 @@ class SkillCompiler:
         params: list[ParameterDefinition] = []
         templated_val = value
 
-        if field_context and any(term in field_context.lower() for term in ("search", "query")):
-            param_name = "search_query"
-            params.append(
-                ParameterDefinition(
-                    name=param_name,
-                    type="string",
-                    description="Search term or query",
-                    required=True,
-                    default_value=None,
-                )
+        # Check if the overall intent indicates search
+        is_search_intent = any(term in (prompt_intent or "").lower() for term in ("search", "find", "lookup", "google", "query"))
+
+        # Explicit search input box check
+        if field_context:
+            fc_low = field_context.lower()
+            is_search_box = (
+                fc_low in ("search", "search box", "search query", "q", "query")
+                or any(term in fc_low for term in ("search input", "search-input", "input#search", "search_query"))
             )
-            return f"{{{{{param_name}}}}}", params
+            # Only treat as dynamic search_query if intent was to search or field is unambiguously a search box
+            if is_search_box and (is_search_intent or len(value.split()) <= 6):
+                param_name = "search_query"
+                params.append(
+                    ParameterDefinition(
+                        name=param_name,
+                        type="string",
+                        description="Search term or query",
+                        required=is_search_intent,
+                        default_value=value if not is_search_intent else None,
+                    )
+                )
+                return f"{{{{{param_name}}}}}", params
 
         # 1. Match dates
         for pat in DATE_PATTERNS:
@@ -234,7 +245,7 @@ class SkillCompiler:
                     )
 
         # 5. Match prompt keywords if user typed specific prompt query
-        if prompt_intent and len(params) == 0:
+        if prompt_intent and is_search_intent and len(params) == 0:
             prompt_words = [w.strip() for w in prompt_intent.split() if len(w) > 3]
             for word in prompt_words:
                 if word.lower() in value.lower() and len(word) >= 4:
@@ -303,6 +314,28 @@ class SkillCompiler:
         if not filtered_actions:
             filtered_actions = raw_actions
 
+        # Filter initial lingering tab navigation if immediately followed by another navigation without interactions
+        if len(filtered_actions) > 1:
+            first = filtered_actions[0]
+            is_initial = (
+                first.action_type == "browser_navigate"
+                and (
+                    first.metadata.get("action") == "initial_page"
+                    or (first.url and any(noise in first.url.lower() for noise in ("google.com/search", "chrome://", "about:blank", "newtab")))
+                )
+            )
+            if is_initial:
+                # Check if user interacted with this initial page before the next navigation
+                has_subsequent_interaction = False
+                for act in filtered_actions[1:]:
+                    if act.action_type in ("browser_click", "browser_type", "desktop_click", "desktop_type"):
+                        has_subsequent_interaction = True
+                        break
+                    if act.action_type == "browser_navigate":
+                        break
+                if not has_subsequent_interaction:
+                    filtered_actions = filtered_actions[1:]
+
         compiled_steps: List[CompiledStepSchema] = []
         all_params: Dict[str, ParameterDefinition] = {}
         environments = set()
@@ -315,21 +348,20 @@ class SkillCompiler:
             if "submit" in act.title.lower() or "pay" in act.title.lower() or "delete" in act.title.lower() or "send" in act.title.lower():
                 is_idempotent = False
 
-            # Parameter generalization with field context
+            # Parameter generalization with field context - ONLY for typing actions
             val_template = act.value
             step_param_refs = []
-            if act.value and not act.is_sensitive:
+            if act.action_type in ("browser_type", "desktop_type") and act.value and not act.is_sensitive:
                 sel = act.selector_bundle or {}
-                field_ctx = sel.get("ariaLabel") or sel.get("name") or act.title
+                # Only use input-specific field context attributes, not arbitrary action titles
+                field_ctx = sel.get("ariaLabel") or sel.get("placeholder") or sel.get("name") or ""
                 templated, extracted_params = self._extract_parameters_from_value(act.value, prompt_intent, field_ctx)
                 val_template = templated
                 for p in extracted_params:
                     all_params[p.name] = p
                     if p.name not in step_param_refs:
                         step_param_refs.append(p.name)
-
-            # For static browser navigation, don't treat URL as a dynamic value_template unless parameterized
-            if act.action_type == "browser_navigate" and (not val_template or "{{" not in str(val_template)):
+            elif act.action_type == "browser_navigate":
                 val_template = None
 
             # Preconditions and Postconditions

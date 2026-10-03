@@ -396,6 +396,56 @@ class TestSkillsPipeline(unittest.IsolatedAsyncioTestCase):
             subject_step = next(s for s in plan_steps if s.get("title") == "Enter Subject")
             self.assertEqual(subject_step["args"]["text"], "Weekly Report")
 
+    def test_compiler_drops_initial_idle_tab_and_no_bogus_search_query(self):
+        """Compiler drops initial tab navigation noise and does not invent search_query parameters for forms."""
+        from backend.agent.skills.semanticizer import RawSemanticAction
+
+        raw_actions = [
+            # Initial tab that was already open when recording started
+            RawSemanticAction(
+                action_type="browser_navigate",
+                execution_engine="browser",
+                title="Navigate to 800aud in inr - Google Search",
+                url="https://www.google.com/search?q=800aud+in+inr",
+                metadata={"action": "initial_page", "domain": "google.com"},
+            ),
+            # Target application navigation
+            RawSemanticAction(
+                action_type="browser_navigate",
+                execution_engine="browser",
+                title="Navigate to docs.google.com/forms/u/0/create",
+                url="https://docs.google.com/forms/u/0/create?usp=dot_new",
+                metadata={"action": "url_changed", "domain": "google.com"},
+            ),
+            # Typing form title
+            RawSemanticAction(
+                action_type="browser_type",
+                execution_engine="browser",
+                title="Type into Form title",
+                selector_bundle={"ariaLabel": "Form title"},
+                value="Automated Feedback Survey",
+            ),
+        ]
+
+        draft = self.compiler.compile(
+            raw_actions=raw_actions,
+            prompt_intent="gform automate",
+            skill_name="Gform Automate",
+        )
+
+        # 1. Initial idle tab must be dropped
+        self.assertEqual(len(draft.steps), 2)
+        self.assertEqual(draft.steps[0].url, "https://docs.google.com/forms/u/0/create?usp=dot_new")
+        self.assertNotIn("search?q=", draft.steps[0].url or "")
+
+        # 2. No search_query parameter should be induced
+        param_names = [p.name for p in draft.parameters_schema]
+        self.assertNotIn("search_query", param_names)
+
+        # 3. Triggers must not demand {{search_query}}
+        for trig in draft.trigger_phrases:
+            self.assertNotIn("search_query", trig)
+
 
 if __name__ == "__main__":
     unittest.main()
