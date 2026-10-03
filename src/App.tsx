@@ -22,6 +22,7 @@ import { useVoiceOutput } from './hooks/useVoiceOutput';
 import { TaskState, HistoryItem } from './types/nexus';
 import { formatSpokenResponse } from './utils/speechUtils';
 import { ExcelCopilot } from './components/ExcelCopilot';
+import { WordCopilot } from './components/WordCopilot';
 import { getPersonalizedPredictions, recordPredictionFeedback } from './services/recommendationEngine';
 import { classifyQuerySafety } from './services/safetyFilter';
 
@@ -29,6 +30,7 @@ export const App: React.FC = () => {
   const urlParams = new URLSearchParams(window.location.search);
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#\/?/, ''));
   const isExcelCopilotView = urlParams.get('view') === 'excel-copilot' || hashParams.get('view') === 'excel-copilot';
+  const isWordCopilotView = urlParams.get('view') === 'word-copilot' || hashParams.get('view') === 'word-copilot';
   const isPillOnlyWindow = urlParams.get('view') === 'pill' || hashParams.get('view') === 'pill';
   const isAuthPage = urlParams.get('view') === 'auth' || hashParams.get('view') === 'auth';
   const isConnectPage = urlParams.get('view') === 'connect' || hashParams.get('view') === 'connect';
@@ -37,6 +39,12 @@ export const App: React.FC = () => {
     const hwndVal = urlParams.get('hwnd') || hashParams.get('hwnd');
     const wbVal = urlParams.get('workbook') || hashParams.get('workbook');
     return <ExcelCopilot hwnd={hwndVal} workbook={wbVal} />;
+  }
+
+  if (isWordCopilotView) {
+    const hwndVal = urlParams.get('hwnd') || hashParams.get('hwnd');
+    const docVal = urlParams.get('document') || hashParams.get('document');
+    return <WordCopilot hwnd={hwndVal} document={docVal} />;
   }
 
   if (isConnectPage) {

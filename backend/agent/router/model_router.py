@@ -32,7 +32,8 @@ VISION_FALLBACK_MODELS = [
 
 GEMMA_VISION_MODEL_CANDIDATES = [
     "gemma-4-26b-a4b-it",
-    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-flash-latest",
 ]
 
 
@@ -551,18 +552,31 @@ async def call_vision_with_dynamic_switch(
     max_attempts: int = 3,
 ) -> str:
     """
-    Executes Groq VLM call with automatic instant failover if a rate limit (429) is hit,
-    then tries a Google/Gemma vision fallback when Groq is unavailable or fails.
+    Executes VLM call with automatic instant failover.
+    Prioritizes Google AI Studio (Gemma / Gemini) vision engine when GEMMA_API_KEY
+    is configured since Groq has decommissioned llama-3.2 vision preview models.
     """
-    groq_key = get_groq_api_key()
     gemma_key = get_gemma_api_key()
+    groq_key = get_groq_api_key()
     last_error = None
 
+    # 1. Primary: Google AI Studio multimodal models (Gemma 4 / Gemini Flash)
+    if gemma_key:
+        try:
+            return await call_gemma_vision_fallback(prompt, data_url)
+        except Exception as gemma_exc:
+            logger.warning("[ModelRouter] Primary Google vision call failed (%s); trying Groq fallback.", gemma_exc)
+            last_error = gemma_exc
+
+    # 2. Secondary: Groq VLM fallback
     if groq_key:
         from groq import Groq
         client = Groq(api_key=groq_key)
         for attempt in range(max_attempts):
             current_model = model_pool.get_active_vision_model()
+            # Skip known decommissioned models
+            if any(dec in current_model for dec in ("vision-preview", "llama-3.2-11b", "llama-3.2-90b")):
+                break
             try:
                 def _sync():
                     res = client.chat.completions.create(
@@ -583,17 +597,14 @@ async def call_vision_with_dynamic_switch(
             except Exception as exc:
                 last_error = exc
                 err_str = str(exc).lower()
+                if "model_decommissioned" in err_str or "no longer supported" in err_str:
+                    logger.warning("[ModelRouter] Groq vision model '%s' is decommissioned.", current_model)
+                    break
                 is_rate_limit = "429" in err_str or "rate limit" in err_str or "quota" in err_str
                 reason = f"Rate limit (429) on '{current_model}'" if is_rate_limit else f"Vision error ({exc})"
                 model_pool.switch_vision_model(reason=reason)
                 await asyncio.sleep(0.4)
 
-    if gemma_key:
-        try:
-            return await call_gemma_vision_fallback(prompt, data_url)
-        except Exception as gemma_exc:
-            last_error = gemma_exc if last_error is None else last_error
-
     if last_error:
         raise last_error
-    raise RuntimeError("Neither Groq nor Gemma vision models were available.")
+    raise RuntimeError("Neither Google nor Groq vision models were available.")

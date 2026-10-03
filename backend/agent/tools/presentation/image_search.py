@@ -79,7 +79,10 @@ async def _download_and_optimize_image(url: str, filename_prefix: str = "img") -
 async def search_wikipedia_image(query: str) -> Optional[Path]:
     """Search Wikipedia PageImages API for authoritative topic lead image."""
     try:
-        clean_q = re.sub(r"[^\w\s-]", "", query).strip()
+        first_line = str(query or "").split("\n")[0].split("\r")[0].strip()
+        clean_q = " ".join(re.sub(r"[^\w\s-]", " ", first_line).split()[:5]).strip()
+        if not clean_q:
+            return None
         headers = {"User-Agent": USER_AGENT}
         params = {
             "action": "query",
@@ -89,7 +92,7 @@ async def search_wikipedia_image(query: str) -> Optional[Path]:
             "format": "json",
         }
 
-        async with httpx.AsyncClient(headers=headers, timeout=8.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=4.0) as client:
             r = await client.get("https://en.wikipedia.org/w/api.php", params=params)
             if r.status_code != 200:
                 return None
@@ -113,7 +116,10 @@ async def search_wikipedia_image(query: str) -> Optional[Path]:
 async def search_wikimedia_commons_image(query: str) -> Optional[Path]:
     """Search Wikimedia Commons for high-quality photos on the topic."""
     try:
-        clean_q = re.sub(r"[^\w\s-]", "", query).strip()
+        first_line = str(query or "").split("\n")[0].split("\r")[0].strip()
+        clean_q = " ".join(re.sub(r"[^\w\s-]", " ", first_line).split()[:5]).strip()
+        if not clean_q:
+            return None
         headers = {"User-Agent": USER_AGENT}
         params = {
             "action": "query",
@@ -126,7 +132,7 @@ async def search_wikimedia_commons_image(query: str) -> Optional[Path]:
             "format": "json",
         }
 
-        async with httpx.AsyncClient(headers=headers, timeout=8.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=4.0) as client:
             r = await client.get("https://commons.wikimedia.org/w/api.php", params=params)
             if r.status_code != 200:
                 return None
@@ -153,14 +159,17 @@ async def search_wikimedia_commons_image(query: str) -> Optional[Path]:
 async def search_openverse_image(query: str) -> Optional[Path]:
     """Fallback search on Openverse for open-access photography."""
     try:
-        clean_q = re.sub(r"[^\w\s-]", "", query).strip()
+        first_line = str(query or "").split("\n")[0].split("\r")[0].strip()
+        clean_q = " ".join(re.sub(r"[^\w\s-]", " ", first_line).split()[:5]).strip()
+        if not clean_q:
+            return None
         headers = {"User-Agent": USER_AGENT}
         params = {
             "q": clean_q,
             "page_size": 3,
         }
 
-        async with httpx.AsyncClient(headers=headers, timeout=8.0) as client:
+        async with httpx.AsyncClient(headers=headers, timeout=4.0) as client:
             r = await client.get("https://api.openverse.org/v1/images/", params=params)
             if r.status_code != 200:
                 return None

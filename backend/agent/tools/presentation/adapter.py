@@ -98,6 +98,21 @@ FONT_TITLE = "Segoe UI"
 FONT_BODY = "Segoe UI"
 
 
+def sanitize_safe_filename(name: str, max_length: int = 50, default: str = "Presentation") -> str:
+    """Robust sanitizer for cross-platform and Windows filesystem filenames."""
+    if not name:
+        return default
+    # Extract only the first line if multi-line text is provided
+    first_line = str(name).split("\n")[0].split("\r")[0].strip()
+    # Strip illegal Windows characters: < > : " / \ | ? * and control chars
+    clean = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", first_line)
+    # Collapse any whitespace / symbols to a single underscore
+    clean = re.sub(r"[\s_]+", "_", clean).strip("._- ")
+    if not clean:
+        clean = default
+    return clean[:max_length].rstrip("._- ")
+
+
 class PresentationAdapter:
     """Orchestrates PowerPoint (.pptx) creation, slide generation, and storage."""
 
@@ -656,7 +671,13 @@ class PresentationAdapter:
 
         self._render_footer(slide, theme, slide_num, total_slides)
 
-    async def generate_presentation_data_with_llm(self, topic: str, num_slides: int = 6, theme: str = "executive_navy") -> Optional[PresentationData]:
+    async def generate_presentation_data_with_llm(
+        self,
+        topic: str,
+        num_slides: int = 6,
+        theme: str = "executive_navy",
+        context_text: Optional[str] = None,
+    ) -> Optional[PresentationData]:
         """Use LLM to generate rich, in-depth presentation structure."""
         from langchain_core.messages import SystemMessage, HumanMessage
         from backend.agent.router.model_router import ainvoke_with_dynamic_switch
@@ -665,21 +686,24 @@ class PresentationAdapter:
         if not (get_groq_api_key() or get_gemma_api_key()):
             return None
 
+        clean_topic_display = sanitize_safe_filename(topic, max_length=60, default="Executive Presentation").replace("_", " ")
+
         system_prompt = (
             "You are an Elite Executive Presentation Designer and Strategic Storyteller. "
             "Your task is to generate a comprehensive, visually compelling, authoritative PowerPoint slide deck "
             "on the user's requested topic.\n\n"
             "Rules:\n"
-            "1. Output STRICTLY valid JSON conforming to the PresentationData schema.\n"
+            "1. Output STRICTLY a valid JSON object conforming to the PresentationData schema. Never include markdown fences or text outside JSON.\n"
             "2. Make bullet points informative, concrete, and deeply relevant with real terminology, metrics, and actionable concepts.\n"
-            "3. Structure the deck with:\n"
+            "3. The 'topic' and 'title' fields MUST be concise single-line strings without newlines (max 60 chars).\n"
+            "4. Structure the deck with:\n"
             "   - Slide 1: 'title' slide\n"
             "   - Slide 2: 'agenda' slide\n"
             "   - Slide 3: 'content' or 'two_column' slide\n"
             "   - Slide 4: 'two_column' (strengths/challenges) or 'stats' slide\n"
             "   - Slide 5: 'content' or 'stats' slide (trends/future)\n"
             "   - Slide 6: 'conclusion' slide\n"
-            "4. Never output placeholders like 'Bullet 1' or 'Point 2'. Write thorough, high-impact content.\n\n"
+            "5. Never output placeholders like 'Bullet 1' or 'Point 2'. Write thorough, high-impact content.\n\n"
             "JSON Format:\n"
             "{\n"
             '  "title": "Main Presentation Title",\n'
@@ -702,7 +726,9 @@ class PresentationAdapter:
             "}"
         )
 
-        user_prompt = f"Create a {num_slides}-slide executive presentation on: {topic}. Theme: {theme}"
+        user_prompt = f"Create a {num_slides}-slide executive presentation on: {clean_topic_display}. Theme: {theme}"
+        if context_text and context_text.strip():
+            user_prompt += f"\n\nContext to incorporate from active document:\n{context_text.strip()[:2000]}"
 
         try:
             res = await asyncio.wait_for(
@@ -711,7 +737,7 @@ class PresentationAdapter:
                     operation="reasoning",
                     temperature=0.2,
                 ),
-                timeout=40.0,
+                timeout=35.0,
             )
             raw = res.content.strip()
             if "```" in raw:
@@ -720,93 +746,185 @@ class PresentationAdapter:
                 start = raw.index("{")
                 end = raw.rindex("}") + 1
                 slice_raw = raw[start:end]
+                data_dict = None
                 try:
                     data_dict = json.loads(slice_raw)
                 except Exception:
+                    # Clean trailing commas
                     cleaned = re.sub(r",\s*([\]}])", r"\1", slice_raw)
-                    data_dict = json.loads(cleaned)
-                return PresentationData(**data_dict)
+                    try:
+                        data_dict = json.loads(cleaned)
+                    except Exception:
+                        # Clean unescaped newlines inside strings
+                        cleaned_nl = re.sub(r'(?<=: ")(.*?)(?="[\s,}])', lambda m: m.group(1).replace('\n', ' '), cleaned, flags=re.DOTALL)
+                        try:
+                            data_dict = json.loads(cleaned_nl)
+                        except Exception:
+                            pass
+                if data_dict:
+                    parsed = PresentationData(**data_dict)
+                    clean_top = sanitize_safe_filename(parsed.topic or clean_topic_display, max_length=60, default=clean_topic_display).replace("_", " ")
+                    parsed.topic = clean_top
+                    parsed.title = re.sub(r"[\r\n\t]+", " ", str(parsed.title or clean_topic_display)).strip()[:80]
+                    return parsed
             return None
         except Exception as err:
             logger.warning(f"LLM presentation data generation fallback to synthesis: {err}")
             return None
 
-
-    def synthesize_fallback_presentation_data(self, topic: str, theme: str = "executive_navy") -> PresentationData:
-        """High-quality deterministic presentation generator for any topic."""
-        clean_topic = topic.strip().title()
+    def synthesize_fallback_presentation_data(
+        self,
+        topic: str,
+        theme: str = "executive_navy",
+        headings: Optional[List[str]] = None,
+        bullets: Optional[List[str]] = None,
+        context_text: Optional[str] = None,
+    ) -> PresentationData:
+        """High-quality deterministic presentation generator with Word context support."""
+        clean_topic = sanitize_safe_filename(topic, max_length=60, default="Executive Presentation").replace("_", " ")
         words = clean_topic.split()
         short_title = clean_topic if len(words) <= 5 else " ".join(words[:5])
 
-        slides = [
-            SlideItem(
-                title=clean_topic,
-                subtitle="Strategic Overview, Industry Drivers & Practical Implementation",
-                slide_type="title",
-                key_takeaway="Executive briefing prepared by NEXUS AI",
-                image_query=clean_topic,
-            ),
-            SlideItem(
-                title="Executive Agenda & Scope",
-                slide_type="agenda",
-                bullets=[
-                    f"Foundations & Background of {short_title}",
-                    "Key Technological & Market Drivers",
-                    "Core Architectural & Operational Paradigms",
-                    "Comparative Advantages & Implementation Challenges",
-                    "Measurable Impact, Metrics & Benchmarks",
-                    "Future Outlook & Strategic Roadmap",
-                ],
-            ),
-            SlideItem(
-                title=f"Core Foundations of {short_title}",
-                slide_type="content",
-                bullets=[
-                    f"Rapid acceleration across global ecosystems is redefining standard approaches to {short_title.lower()}.",
-                    "Integration of modernized methodologies delivers substantial efficiency and high-fidelity output.",
-                    "Scalable infrastructure enables continuous adaptation while minimizing overhead and technical debt.",
-                    "Cross-disciplinary convergence bridges legacy workflows with state-of-the-art automated systems.",
-                ],
-                key_takeaway=f"{short_title} represents a fundamental transition toward autonomous, resilient operational models.",
-                image_query=f"{short_title} technology",
-            ),
-            SlideItem(
-                title="Strategic Analysis: Opportunities vs. Challenges",
-                slide_type="two_column",
-                left_heading="Strategic Advantages & Drivers",
-                left_bullets=[
-                    "Accelerated speed-to-market and streamlined execution cycles",
-                    "Significantly reduced margin of human error across complex pipelines",
-                    "Data-driven visibility providing predictive rather than reactive insights",
-                ],
-                right_heading="Critical Risks & Constraints",
-                right_bullets=[
-                    "Governance, compliance, and rigorous data protection standards",
-                    "Integration friction with heterogeneous legacy environments",
-                    "Need for specialized expertise and organizational change management",
-                ],
-            ),
-            SlideItem(
-                title="Key Metrics & Measurable Impact",
-                slide_type="stats",
-                stats=[
-                    {"value": "10x", "label": "Deployment Velocity"},
-                    {"value": "74%", "label": "Operational Efficiency"},
-                    {"value": "99.8%", "label": "Reliability & Uptime"},
-                ],
-                key_takeaway="Quantitative verification confirms substantial ROI and accelerated cycle completion across all tiers.",
-            ),
-            SlideItem(
-                title="Strategic Roadmap & Recommendations",
-                slide_type="conclusion",
-                bullets=[
-                    "Phase 1: Establish foundational baseline benchmarks and align stakeholder governance.",
-                    "Phase 2: Pilot high-impact modular deployments with continuous telemetry tracking.",
-                    "Phase 3: Scale enterprise-wide adoption with automated auditing and optimization loops.",
-                ],
-                key_takeaway=f"Accelerating {short_title} initiatives unlocks durable competitive advantage and scalable growth.",
-            ),
-        ]
+        valid_headings = [re.sub(r"[\r\n\t]+", " ", h).strip() for h in (headings or []) if h and len(h.strip()) > 2]
+        valid_bullets = [re.sub(r"[\r\n\t]+", " ", b).strip() for b in (bullets or []) if b and len(b.strip()) > 15]
+
+        if valid_headings or valid_bullets:
+            slides = [
+                SlideItem(
+                    title=clean_topic,
+                    subtitle="Executive Summary & Strategic Analysis",
+                    slide_type="title",
+                    key_takeaway="Synthesized directly from active Word document context",
+                    image_query=short_title,
+                ),
+                SlideItem(
+                    title="Executive Agenda & Scope",
+                    slide_type="agenda",
+                    bullets=valid_headings[:6] if valid_headings else [
+                        f"Foundations & Scope of {short_title}",
+                        "Detailed Analysis & Findings",
+                        "Key Operational Drivers",
+                        "Strategic Recommendations",
+                    ],
+                ),
+                SlideItem(
+                    title=valid_headings[0] if valid_headings else f"Core Foundations of {short_title}",
+                    slide_type="content",
+                    bullets=valid_bullets[:4] if valid_bullets else [
+                        f"Integration of modernized systems delivers substantial efficiency for {short_title.lower()}.",
+                        "Scalable architecture enables continuous adaptation and operational stability.",
+                        "Data-driven processes bridge legacy workflows with high-fidelity output.",
+                    ],
+                    key_takeaway=f"{short_title} drives essential operational capabilities.",
+                    image_query=f"{short_title} technology",
+                ),
+                SlideItem(
+                    title=valid_headings[1] if len(valid_headings) > 1 else "Strategic Opportunities vs. Challenges",
+                    slide_type="two_column",
+                    left_heading="Strategic Drivers & Observations",
+                    left_bullets=valid_bullets[4:7] if len(valid_bullets) >= 7 else [
+                        "Accelerated speed-to-market and streamlined execution cycles",
+                        "Significantly reduced margin of human error across complex pipelines",
+                        "Enhanced predictability through data-driven visibility",
+                    ],
+                    right_heading="Operational Considerations",
+                    right_bullets=valid_bullets[7:10] if len(valid_bullets) >= 10 else [
+                        "Governance, compliance, and rigorous data protection standards",
+                        "Integration friction with heterogeneous legacy environments",
+                        "Need for specialized expertise and organizational change management",
+                    ],
+                ),
+                SlideItem(
+                    title=valid_headings[2] if len(valid_headings) > 2 else "Key Metrics & Measurable Impact",
+                    slide_type="stats",
+                    stats=[
+                        {"value": "10x", "label": "Deployment Velocity"},
+                        {"value": "74%", "label": "Operational Efficiency"},
+                        {"value": "99.8%", "label": "Reliability & Uptime"},
+                    ],
+                    key_takeaway="Quantitative verification confirms accelerated cycle completion across all tiers.",
+                ),
+                SlideItem(
+                    title=valid_headings[3] if len(valid_headings) > 3 else "Strategic Roadmap & Recommendations",
+                    slide_type="conclusion",
+                    bullets=[
+                        "Phase 1: Establish foundational baseline benchmarks and align stakeholder governance.",
+                        "Phase 2: Pilot high-impact modular deployments with continuous telemetry tracking.",
+                        "Phase 3: Scale enterprise-wide adoption with automated auditing and optimization loops.",
+                    ],
+                    key_takeaway=f"Accelerating {short_title} initiatives unlocks durable competitive advantage and scalable growth.",
+                ),
+            ]
+        else:
+            slides = [
+                SlideItem(
+                    title=clean_topic,
+                    subtitle="Strategic Overview, Industry Drivers & Practical Implementation",
+                    slide_type="title",
+                    key_takeaway="Executive briefing prepared by NEXUS AI",
+                    image_query=short_title,
+                ),
+                SlideItem(
+                    title="Executive Agenda & Scope",
+                    slide_type="agenda",
+                    bullets=[
+                        f"Foundations & Background of {short_title}",
+                        "Key Technological & Market Drivers",
+                        "Core Architectural & Operational Paradigms",
+                        "Comparative Advantages & Implementation Challenges",
+                        "Measurable Impact, Metrics & Benchmarks",
+                        "Future Outlook & Strategic Roadmap",
+                    ],
+                ),
+                SlideItem(
+                    title=f"Core Foundations of {short_title}",
+                    slide_type="content",
+                    bullets=[
+                        f"Rapid acceleration across global ecosystems is redefining standard approaches to {short_title.lower()}.",
+                        "Integration of modernized methodologies delivers substantial efficiency and high-fidelity output.",
+                        "Scalable infrastructure enables continuous adaptation while minimizing overhead and technical debt.",
+                        "Cross-disciplinary convergence bridges legacy workflows with state-of-the-art automated systems.",
+                    ],
+                    key_takeaway=f"{short_title} represents a fundamental transition toward autonomous, resilient operational models.",
+                    image_query=f"{short_title} technology",
+                ),
+                SlideItem(
+                    title="Strategic Analysis: Opportunities vs. Challenges",
+                    slide_type="two_column",
+                    left_heading="Strategic Advantages & Drivers",
+                    left_bullets=[
+                        "Accelerated speed-to-market and streamlined execution cycles",
+                        "Significantly reduced margin of human error across complex pipelines",
+                        "Data-driven visibility providing predictive rather than reactive insights",
+                    ],
+                    right_heading="Critical Risks & Constraints",
+                    right_bullets=[
+                        "Governance, compliance, and rigorous data protection standards",
+                        "Integration friction with heterogeneous legacy environments",
+                        "Need for specialized expertise and organizational change management",
+                    ],
+                ),
+                SlideItem(
+                    title="Key Metrics & Measurable Impact",
+                    slide_type="stats",
+                    stats=[
+                        {"value": "10x", "label": "Deployment Velocity"},
+                        {"value": "74%", "label": "Operational Efficiency"},
+                        {"value": "99.8%", "label": "Reliability & Uptime"},
+                    ],
+                    key_takeaway="Quantitative verification confirms substantial ROI and accelerated cycle completion across all tiers.",
+                ),
+                SlideItem(
+                    title="Strategic Roadmap & Recommendations",
+                    slide_type="conclusion",
+                    bullets=[
+                        "Phase 1: Establish foundational baseline benchmarks and align stakeholder governance.",
+                        "Phase 2: Pilot high-impact modular deployments with continuous telemetry tracking.",
+                        "Phase 3: Scale enterprise-wide adoption with automated auditing and optimization loops.",
+                    ],
+                    key_takeaway=f"Accelerating {short_title} initiatives unlocks durable competitive advantage and scalable growth.",
+                ),
+            ]
 
         return PresentationData(
             title=clean_topic,
@@ -819,7 +937,6 @@ class PresentationAdapter:
     def render_presentation(self, data: PresentationData) -> Presentation:
         """Render a PresentationData object into a python-pptx Presentation instance (16:9)."""
         prs = Presentation()
-        # Set 16:9 widescreen dimensions
         prs.slide_width = Inches(13.333)
         prs.slide_height = Inches(7.5)
 
@@ -849,28 +966,31 @@ class PresentationAdapter:
         """Search and download relevant pictures from the web to embed in appropriate slides."""
         from backend.agent.tools.presentation.image_search import fetch_relevant_image
 
+        first_line = str(data.topic or "").split("\n")[0].split("\r")[0].strip()
         clean_topic = re.sub(
             r"\b(presentation|powerpoint|deck|overview|slides|summary|briefing|report|intro)\b",
             "",
-            data.topic,
+            first_line,
             flags=re.IGNORECASE
         ).strip()
+        clean_topic = " ".join(re.sub(r"[^\w\s-]", " ", clean_topic).split()[:4]).strip()
         if not clean_topic:
-            clean_topic = data.topic
+            clean_topic = "technology"
 
         used_paths = set()
 
         # 1. Title slide hero image
         if data.slides and not data.slides[0].image_path:
-            hero_q = data.slides[0].image_query or clean_topic
+            raw_hero = data.slides[0].image_query or clean_topic
+            hero_q = " ".join(re.sub(r"[^\w\s-]", " ", str(raw_hero).split("\n")[0]).split()[:4]).strip() or clean_topic
             try:
-                hero_img = await fetch_relevant_image(hero_q)
+                hero_img = await asyncio.wait_for(fetch_relevant_image(hero_q), timeout=4.0)
                 if hero_img:
                     data.slides[0].image_path = str(hero_img)
-                    data.slides[0].image_caption = clean_topic.title()
+                    data.slides[0].image_caption = hero_q.title()
                     used_paths.add(str(hero_img))
             except Exception as e:
-                logger.warning(f"Could not fetch title hero image for '{hero_q}': {e}")
+                logger.debug(f"Could not fetch title hero image for '{hero_q}': {e}")
 
         # 2. Content slides image enrichment
         for slide in data.slides[1:]:
@@ -879,14 +999,11 @@ class PresentationAdapter:
             if slide.image_path:
                 used_paths.add(str(slide.image_path))
                 continue
-            # Keep at most 2 additional content pictures so deck remains balanced and uncluttered
             if len(used_paths) >= 3:
                 break
 
-            # Derive search query for this slide
             query = slide.image_query
             if not query:
-                # Remove common slide filler words to extract key noun phrase
                 cleaned_title = re.sub(
                     r"\b(strategic|analysis|overview|foundations|core|impact|metrics|roadmap|recommendations|key|the|of|and|in|a|an)\b",
                     "",
@@ -899,8 +1016,10 @@ class PresentationAdapter:
                 else:
                     query = clean_topic
 
+            query = " ".join(re.sub(r"[^\w\s-]", " ", str(query).split("\n")[0]).split()[:4]).strip() or clean_topic
+
             try:
-                img_path = await fetch_relevant_image(query, fallback_topic=clean_topic)
+                img_path = await asyncio.wait_for(fetch_relevant_image(query, fallback_topic=clean_topic), timeout=4.0)
                 if img_path and str(img_path) not in used_paths:
                     slide.image_path = str(img_path)
                     slide.image_caption = query.title()
@@ -916,6 +1035,9 @@ class PresentationAdapter:
         session_id: Optional[str] = None,
         custom_data: Optional[Dict[str, Any]] = None,
         include_images: bool = True,
+        context_text: Optional[str] = None,
+        raw_headings: Optional[List[str]] = None,
+        raw_bullets: Optional[List[str]] = None,
     ) -> Tuple[str, Path, PresentationData]:
         """
         Create a new presentation from topic or data.
@@ -923,14 +1045,31 @@ class PresentationAdapter:
         """
         sid = session_id or f"ppt-{uuid.uuid4().hex[:8]}"
 
+        clean_topic = sanitize_safe_filename(topic, max_length=60, default="Executive Presentation").replace("_", " ")
+
         if custom_data:
             data = PresentationData(**custom_data)
         else:
-            llm_data = await self.generate_presentation_data_with_llm(topic=topic, num_slides=num_slides, theme=theme)
+            llm_data = await self.generate_presentation_data_with_llm(
+                topic=clean_topic,
+                num_slides=num_slides,
+                theme=theme,
+                context_text=context_text,
+            )
             if llm_data:
                 data = llm_data
             else:
-                data = self.synthesize_fallback_presentation_data(topic=topic, theme=theme)
+                data = self.synthesize_fallback_presentation_data(
+                    topic=clean_topic,
+                    theme=theme,
+                    headings=raw_headings,
+                    bullets=raw_bullets,
+                    context_text=context_text,
+                )
+
+        # Ensure safe topic and title
+        data.topic = sanitize_safe_filename(data.topic or clean_topic, max_length=60, default=clean_topic).replace("_", " ")
+        data.title = re.sub(r"[\r\n\t]+", " ", str(data.title or clean_topic)).strip()[:80]
 
         # Search and insert relevant web photography if enabled
         if include_images and getattr(data, "include_images", True):
@@ -944,10 +1083,8 @@ class PresentationAdapter:
         # Stage in temporary / scratch folder
         scratch_dir = Path("scratch")
         scratch_dir.mkdir(parents=True, exist_ok=True)
-        sanitized_topic = re.sub(r"[^\w\s-]", "", data.topic).strip().replace(" ", "_")
-        if not sanitized_topic:
-            sanitized_topic = "Presentation"
-        staging_filename = f"{sanitized_topic}_{sid}.pptx"
+        sanitized_slug = sanitize_safe_filename(data.topic, max_length=40, default="Presentation")
+        staging_filename = f"{sanitized_slug}_{sid}.pptx"
         staging_path = (scratch_dir / staging_filename).resolve()
 
         prs.save(str(staging_path))
@@ -957,7 +1094,7 @@ class PresentationAdapter:
             "data": data,
             "presentation": prs,
             "staging_path": staging_path,
-            "default_filename": f"{sanitized_topic}.pptx",
+            "default_filename": f"{sanitized_slug}.pptx",
             "topic": data.topic,
         }
 
@@ -982,17 +1119,24 @@ class PresentationAdapter:
         else:
             raise ValueError("No active presentation session to save.")
 
-        def_name = default_filename or sess.get("default_filename") or "presentation.pptx"
-        if not def_name.lower().endswith(".pptx"):
-            def_name += ".pptx"
+        raw_name = default_filename or sess.get("default_filename") or "presentation.pptx"
+        if raw_name.lower().endswith(".pptx"):
+            raw_base = raw_name[:-5]
+        else:
+            raw_base = raw_name
+        clean_base = sanitize_safe_filename(raw_base, max_length=50, default="Presentation")
+        def_name = f"{clean_base}.pptx"
 
         if not output_path or not str(output_path).strip():
             target_file = get_active_desktop() / def_name
         else:
             target_file = resolve_system_path(output_path, default_filename=def_name)
 
-        if target_file.is_dir() or str(output_path).lower().rstrip("/\\") in ("desktop", "documents", "downloads"):
+        if target_file.is_dir():
             target_file = target_file / def_name
+
+        if not target_file.name.lower().endswith(".pptx"):
+            target_file = target_file.with_name(f"{target_file.name}.pptx")
 
         target_file.parent.mkdir(parents=True, exist_ok=True)
 

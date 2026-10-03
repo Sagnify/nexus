@@ -33,33 +33,38 @@ async def _record_skill_telemetry(
                 failed_step_idx = i
                 break
 
-        from backend.database.session import AsyncSessionLocal
+        from backend.database.session import safe_db_context
         from backend.database.repositories.skill_repo import SkillRepository
-        async with AsyncSessionLocal() as session:
+        import asyncio
+        async with safe_db_context() as session:
+            if not session:
+                return
             repo = SkillRepository(session)
-            await repo.record_execution(
-                skill_id=skill_id,
-                user_id=user_id,
-                version_number=version_number,
-                status=status,
-                parameters_used=state.get("resolved_params") or {},
-                step_results=[
-                    {
-                        "id": s.get("id"),
-                        "title": s.get("title"),
-                        "status": s.get("status"),
-                        "result": s.get("result"),
-                        "error": s.get("error"),
-                    }
-                    for s in plan
-                ],
-                error_message=error_message,
-                failed_step_index=failed_step_idx,
+            await asyncio.wait_for(
+                repo.record_execution(
+                    skill_id=skill_id,
+                    user_id=user_id,
+                    version_number=version_number,
+                    status=status,
+                    parameters_used=state.get("resolved_params") or {},
+                    step_results=[
+                        {
+                            "id": s.get("id"),
+                            "title": s.get("title"),
+                            "status": s.get("status"),
+                            "result": s.get("result"),
+                            "error": s.get("error"),
+                        }
+                        for s in plan
+                    ],
+                    error_message=error_message,
+                    failed_step_index=failed_step_idx,
+                ),
+                timeout=3.0,
             )
-            await session.commit()
     except Exception as exc:
         import logging
-        logging.getLogger("nexus.evaluator").warning("Skill execution telemetry recording skipped: %s", exc)
+        logging.getLogger("nexus.evaluator").debug("Skill execution telemetry recording skipped: %s", exc)
 
 
 def get_synthesis_prompt() -> str:

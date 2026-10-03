@@ -957,3 +957,164 @@ async def execute_excel_instruction(req: ExcelExecuteRequest):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WORD COPILOT FLOATING PILL ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class WordExecuteRequest(BaseModel):
+    instruction: str
+    hwnd: Optional[int] = None
+    document_name: Optional[str] = None
+
+
+@router.get("/word/windows")
+async def get_word_windows(copilot_hwnds: Optional[str] = None, electron_pid: Optional[int] = None):
+    """Enumerate all open Word windows and their bounding rects on the desktop."""
+    from backend.agent.tools.word_copilot.resolver import get_open_word_windows
+    hwnds_set = set()
+    if copilot_hwnds:
+        for p in copilot_hwnds.split(","):
+            p_str = p.strip().lstrip("-")
+            if p_str.isdigit():
+                hwnds_set.add(int(p.strip()))
+    windows = get_open_word_windows(copilot_hwnds=hwnds_set, electron_pid=electron_pid)
+    return {"windows": windows}
+
+
+@router.get("/word/context")
+async def get_word_context(hwnd: Optional[int] = None, document_name: Optional[str] = None):
+    """Acquire real-time deep context for a specific Word window or document."""
+    from backend.agent.tools.word_copilot.context import acquire_deep_word_context
+    try:
+        ctx = acquire_deep_word_context(document_name=document_name, hwnd=hwnd)
+        return {"context": ctx}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Cannot acquire Word context: {e}")
+
+
+@router.post("/word/execute")
+async def execute_word_instruction(req: WordExecuteRequest):
+    """Execute a natural-language document operation directly in the target Word document."""
+    from backend.agent.tools.word_copilot.resolver import resolve_word_target
+    from backend.agent.tools.word_copilot.context import acquire_deep_word_context
+    from backend.agent.tools.word_copilot.planner import build_word_copilot_plan
+    from backend.agent.tools.registry import tool_registry
+
+    # 1. Resolve exact target
+    try:
+        word_app, doc, win = resolve_word_target(
+            document_name=req.document_name,
+            hwnd=req.hwnd,
+        )
+    except Exception as err:
+        raise HTTPException(status_code=400, detail=f"Cannot connect to Word target: {err}")
+
+    # 2. Acquire real-time context
+    active_target = {
+        "application": "Word",
+        "target_type": "word",
+        "window_id": str(getattr(win, "Hwnd", req.hwnd or "")),
+        "target_name": str(getattr(doc, "Name", req.document_name or "")),
+        "file_path": str(getattr(doc, "FullName", "")),
+    }
+    context = acquire_deep_word_context(document_name=req.document_name, hwnd=req.hwnd)
+
+    # 3. Compile plan
+    plan = build_word_copilot_plan(req.instruction, active_target, context)
+
+    if not plan:
+        # Dynamic AI fallback planning
+        try:
+            import json
+            import re
+            from langchain_core.messages import HumanMessage
+            from backend.agent.router.model_router import ainvoke_with_dynamic_switch
+
+            fallback_prompt = (
+                f"You are NEXUS Word Copilot. Translate this document command into a 1-step JSON plan array.\n"
+                f"Document: {context.get('document_name')}, Selection: '{context.get('selection', {}).get('text')}'\n"
+                f"User Instruction: \"{req.instruction}\"\n\n"
+                f"Available tools and valid operations:\n"
+                f"- 'word_format_text': bold (bool), italic (bool), underline (bool|str), font_size (num), font_name (str), font_color (str), highlight_color (str), strikethrough (bool), case ('uppercase'|'lowercase'|'titlecase'), target_text (str)\n"
+                f"- 'word_clipboard_op': operation in ['copy', 'cut', 'paste', 'duplicate'], target_text (str), paste_text (str), position in ['selection', 'end', 'start']\n"
+                f"- 'word_find_replace': find_text (str), replace_with (str), replace_all (bool), match_case (bool)\n"
+                f"- 'word_format_paragraph': alignment in ['left', 'center', 'right', 'justify'], line_spacing (num: 1.0, 1.5, 2.0), indent ('increase'|'decrease'|num), bullets ('bullet'|'number'|'none')\n"
+                f"- 'word_insert': item_type in ['table', 'image', 'shape', 'hyperlink', 'header', 'footer', 'page_break'], rows (num), cols (num), headers (list), url (str), text (str), shape_type (str), path_or_url (str)\n\n"
+                f"Output strictly a JSON list with one object: [{{\"title\": \"...\", \"description\": \"...\", \"tool\": \"...\", \"args\": {{...}}}}] without markdown fencing."
+            )
+            llm_res = await ainvoke_with_dynamic_switch([HumanMessage(content=fallback_prompt)], temperature=0.0)
+            raw_text = getattr(llm_res, "content", str(llm_res)).strip()
+            if "```" in raw_text:
+                m_json = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_text)
+                if m_json:
+                    raw_text = m_json.group(1).strip()
+            parsed_plan = json.loads(raw_text)
+            if isinstance(parsed_plan, list) and len(parsed_plan) > 0 and "tool" in parsed_plan[0]:
+                plan = parsed_plan
+        except Exception as llm_err:
+            logger.warning(f"Word AI fallback planning error: {llm_err}")
+
+    if not plan:
+        return {
+            "success": False,
+            "error": f"Could not determine structured Word operation for: '{req.instruction}'. Try specifying formatting or content (e.g. 'make bold', 'center align', 'replace X with Y', 'insert table 3x3').",
+            "plan": [],
+            "results": [],
+            "context": context,
+        }
+
+    # 4. Execute each planned tool step
+    results = []
+    overall_success = True
+    for step in plan:
+        tool_name = step.get("tool")
+        params = dict(step.get("parameters") or step.get("args") or {})
+        if "hwnd" not in params and req.hwnd:
+            params["hwnd"] = req.hwnd
+        if "document_name" not in params and req.document_name:
+            params["document_name"] = req.document_name
+
+        try:
+            tool_obj = tool_registry.get(tool_name)
+            if not tool_obj:
+                raise ValueError(f"Tool '{tool_name}' not found.")
+            tool_res = await tool_obj.execute(**params)
+            results.append({
+                "step_id": step.get("step_id"),
+                "tool": tool_name,
+                "success": tool_res.success,
+                "output": tool_res.output,
+                "error": tool_res.error,
+                "metadata": tool_res.metadata,
+            })
+            if not tool_res.success:
+                overall_success = False
+                break
+        except Exception as ex:
+            overall_success = False
+            results.append({
+                "step_id": step.get("step_id"),
+                "tool": tool_name,
+                "success": False,
+                "error": str(ex),
+            })
+            break
+
+    # 5. Refresh context after mutation
+    updated_context = acquire_deep_word_context(document_name=req.document_name, hwnd=req.hwnd)
+    last_res = results[-1] if results else {}
+    base_msg = (
+        last_res.get("output", "Operation completed successfully in Word.")
+        if last_res.get("success")
+        else (last_res.get("error", "Execution failed") if results else "No operations executed.")
+    )
+
+    return {
+        "success": overall_success,
+        "plan": plan,
+        "results": results,
+        "updated_context": updated_context,
+        "message": base_msg,
+    }
+
+

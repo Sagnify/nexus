@@ -647,6 +647,209 @@ function trackExcelWindows() {
   });
 }
 
+interface WordWindowInfo {
+  hwnd: number | null;
+  title: string;
+  document_name: string;
+  document_path: string;
+  visible: boolean;
+  is_minimized: boolean;
+  is_foreground?: boolean;
+  rect: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null;
+}
+
+const wordCopilotWindows = new Map<number, BrowserWindow>();
+let wordTrackInterval: ReturnType<typeof setInterval> | null = null;
+let isTrackingWord = false;
+
+function trackWordWindows() {
+  if (isTrackingWord) return;
+  isTrackingWord = true;
+
+  // Collect native HWNDs of open copilot windows so user clicks on copilot keep it active
+  const copilotHwnds: number[] = [];
+  for (const win of wordCopilotWindows.values()) {
+    if (!win.isDestroyed()) {
+      try {
+        const buf = win.getNativeWindowHandle();
+        if (buf && buf.length >= 4) {
+          copilotHwnds.push(buf.readInt32LE(0));
+        }
+      } catch (_) {}
+    }
+  }
+
+  const queryParts = [`electron_pid=${process.pid}`];
+  if (copilotHwnds.length > 0) {
+    queryParts.push(`copilot_hwnds=${copilotHwnds.join(',')}`);
+  }
+  const endpointUrl = `http://127.0.0.1:8000/api/nexus/word/windows?${queryParts.join('&')}`;
+
+  const req = http.get(endpointUrl, (res) => {
+    let data = '';
+    res.on('data', chunk => { data += chunk; });
+    res.on('end', () => {
+      isTrackingWord = false;
+      try {
+        if (res.statusCode !== 200) return;
+        const parsed = JSON.parse(data);
+        const windows: WordWindowInfo[] = parsed.windows || [];
+        const activeHwnds = new Set<number>();
+
+        for (const winInfo of windows) {
+          if (!winInfo.hwnd) continue;
+          activeHwnds.add(winInfo.hwnd);
+
+          const existingWin = wordCopilotWindows.get(winInfo.hwnd);
+
+          // Strictly stay visible ONLY when Word is visible, not minimized, and either Word or Copilot is in the foreground
+          const shouldBeVisible = winInfo.visible && !winInfo.is_minimized && winInfo.is_foreground === true && !!winInfo.rect;
+
+          if (!shouldBeVisible) {
+            if (existingWin && !existingWin.isDestroyed() && existingWin.isVisible()) {
+              existingWin.hide();
+            }
+            continue;
+          }
+
+          if (!winInfo.rect) continue;
+          const dipRect = convertPhysicalRectToDip(winInfo.rect);
+          const defaultWidth = 160;
+          const defaultHeight = 48;
+
+          // Target top-right of Word document window
+          let targetX = dipRect.right - defaultWidth - 35;
+          let targetY = Math.max(dipRect.top + 160, dipRect.display.workArea.y + 155);
+
+          // Work area clamping to guarantee the pill is always 100% visible on the active monitor
+          const minX = dipRect.display.workArea.x + 10;
+          const maxX = dipRect.display.workArea.x + dipRect.display.workArea.width - defaultWidth - 15;
+          const minY = dipRect.display.workArea.y + 40;
+          const maxY = dipRect.display.workArea.y + dipRect.display.workArea.height - defaultHeight - 15;
+
+          targetX = Math.max(minX, Math.min(targetX, maxX));
+          targetY = Math.max(minY, Math.min(targetY, maxY));
+
+          if (!existingWin || existingWin.isDestroyed()) {
+            console.log(`[Word Copilot] 🎯 Attaching floating copilot to hwnd=${winInfo.hwnd} (${winInfo.title}) at (${targetX}, ${targetY}) [scaleFactor=${dipRect.scale}]`);
+            const copilotWin = new BrowserWindow({
+              width: defaultWidth,
+              height: defaultHeight,
+              x: targetX,
+              y: targetY,
+              frame: false,
+              transparent: true,
+              alwaysOnTop: true,
+              skipTaskbar: true,
+              resizable: false,
+              hasShadow: false,
+              show: true,
+              backgroundColor: '#00000000',
+              webPreferences: {
+                preload: path.join(__dirname, 'preload.cjs'),
+                nodeIntegration: false,
+                contextIsolation: true,
+                spellcheck: false,
+                backgroundThrottling: false,
+              },
+            });
+
+            copilotWin.setVisibleOnAllWorkspaces(true);
+            copilotWin.setAlwaysOnTop(true);
+
+            const queryStr = `view=word-copilot&hwnd=${winInfo.hwnd}&document=${encodeURIComponent(winInfo.document_name)}`;
+            const baseUrl = process.env.VITE_DEV_SERVER_URL;
+            if (baseUrl) {
+              const cleanBase = baseUrl.replace(/\/$/, '');
+              const urlToLoad = `${cleanBase}/?${queryStr}`;
+              console.log(`[Word Copilot] Loading URL: ${urlToLoad}`);
+              copilotWin.loadURL(urlToLoad);
+            } else {
+              copilotWin.loadFile(path.join(__dirname, '../dist/index.html'), {
+                query: {
+                  view: 'word-copilot',
+                  hwnd: String(winInfo.hwnd),
+                  document: winInfo.document_name,
+                },
+                hash: queryStr,
+              });
+            }
+
+            copilotWin.webContents.on('did-finish-load', () => {
+              if (copilotWin && !copilotWin.isDestroyed()) {
+                copilotWin.show();
+                copilotWin.setAlwaysOnTop(true);
+                copilotWin.moveTop();
+              }
+            });
+
+            copilotWin.webContents.on('did-fail-load', (_e, code, desc) => {
+              console.error(`[Word Copilot] Failed to load copilot webContents: code=${code}, desc=${desc}`);
+            });
+
+            copilotWin.on('blur', () => {
+              // When user clicks away from copilot, immediately re-check foreground window state
+              setImmediate(trackWordWindows);
+            });
+
+            copilotWin.on('closed', () => {
+              if (winInfo.hwnd) wordCopilotWindows.delete(winInfo.hwnd);
+            });
+
+            wordCopilotWindows.set(winInfo.hwnd, copilotWin);
+          } else {
+            // Already created: update position if Word moved and copilot is collapsed
+            const curBounds = existingWin.getBounds();
+            if (curBounds.width <= 200) {
+              if (Math.abs(curBounds.x - targetX) > 5 || Math.abs(curBounds.y - targetY) > 5) {
+                existingWin.setBounds({ x: targetX, y: targetY, width: curBounds.width, height: curBounds.height }, false);
+              }
+            } else {
+              // Expanded mode: keep inside Word window boundaries & workArea
+              const expWidth = curBounds.width;
+              const expHeight = curBounds.height;
+              let expandedX = dipRect.right - expWidth - 30;
+              let expandedY = Math.max(dipRect.top + 120, dipRect.display.workArea.y + 100);
+
+              const maxExpX = dipRect.display.workArea.x + dipRect.display.workArea.width - expWidth - 15;
+              const maxExpY = dipRect.display.workArea.y + dipRect.display.workArea.height - expHeight - 15;
+
+              expandedX = Math.max(dipRect.display.workArea.x + 10, Math.min(expandedX, maxExpX));
+              expandedY = Math.max(dipRect.display.workArea.y + 40, Math.min(expandedY, maxExpY));
+
+              if (Math.abs(curBounds.x - expandedX) > 10 || Math.abs(curBounds.y - expandedY) > 10) {
+                existingWin.setBounds({ x: expandedX, y: expandedY, width: curBounds.width, height: curBounds.height }, false);
+              }
+            }
+            if (!existingWin.isVisible()) {
+              existingWin.show();
+              existingWin.setAlwaysOnTop(true);
+              existingWin.moveTop();
+            }
+          }
+        }
+
+        // Clean up closed Word windows
+        for (const [hwnd, win] of wordCopilotWindows.entries()) {
+          if (!activeHwnds.has(hwnd)) {
+            if (!win.isDestroyed()) {
+              win.destroy();
+            }
+            wordCopilotWindows.delete(hwnd);
+          }
+        }
+      } catch (_) {}
+    });
+  });
+  req.on('error', () => {
+    isTrackingWord = false;
+  });
+  req.setTimeout(800, () => {
+    req.destroy();
+    isTrackingWord = false;
+  });
+}
+
 // Ensure single instance
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
@@ -857,11 +1060,27 @@ if (!gotTheLock) {
       }
     });
 
+    ipcMain.on('word-copilot-resize', (_event, { hwnd, width, height }: { hwnd: number; width: number; height: number }) => {
+      let win = wordCopilotWindows.get(Number(hwnd));
+      if (!win && wordCopilotWindows.size > 0) {
+        win = Array.from(wordCopilotWindows.values())[0];
+      }
+      if (win && !win.isDestroyed()) {
+        const bounds = win.getBounds();
+        const newX = bounds.x + bounds.width - width;
+        win.setBounds({ x: newX, y: bounds.y, width, height }, false);
+      }
+    });
+
     ipcMain.on('app-quit', () => app.quit());
 
     // Start background tracking of open Excel windows
     trackExcelWindows();
     excelTrackInterval = setInterval(trackExcelWindows, 300);
+
+    // Start background tracking of open Word windows
+    trackWordWindows();
+    wordTrackInterval = setInterval(trackWordWindows, 150);
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -877,10 +1096,15 @@ if (!gotTheLock) {
     globalShortcut.unregisterAll();
     if (reregisterInterval) clearInterval(reregisterInterval);
     if (excelTrackInterval) clearInterval(excelTrackInterval);
+    if (wordTrackInterval) clearInterval(wordTrackInterval);
     for (const win of excelCopilotWindows.values()) {
       if (!win.isDestroyed()) win.destroy();
     }
     excelCopilotWindows.clear();
+    for (const win of wordCopilotWindows.values()) {
+      if (!win.isDestroyed()) win.destroy();
+    }
+    wordCopilotWindows.clear();
     try {
       loopbackServer?.close();
     } catch (_) {}

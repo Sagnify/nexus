@@ -10,7 +10,7 @@ _DEFAULTS: dict = {
     "gemma_api_key": "",
     "groq_fast_model": "openai/gpt-oss-20b",
     "groq_reasoning_model": "openai/gpt-oss-20b",
-    "groq_vision_model": "llama-3.2-11b-vision-preview",
+    "groq_vision_model": "openai/gpt-oss-20b",
     "groq_tool_model": "openai/gpt-oss-20b",
     "postgres_url": "",
     "embedding_model": "all-minilm",
@@ -43,12 +43,13 @@ class SettingsStore:
                 "mixtral-8x7b", "mixtral-8x22b",
                 "llama2", "codellama", "compound",
                 "llama-3.1-8b-instant", "llama-3.2-8b",
+                "llama-3.2-11b", "llama-3.2-90b", "vision-preview",
             )
             dirty = False
             model_defaults = {
                 "groq_fast_model": "openai/gpt-oss-20b",
                 "groq_reasoning_model": "openai/gpt-oss-20b",
-                "groq_vision_model": "llama-3.2-11b-vision-preview",
+                "groq_vision_model": "openai/gpt-oss-20b",
                 "groq_tool_model": "openai/gpt-oss-20b",
             }
             # Also migrate qwen models in fast/tool roles to prevent 1000 OTPM rate-limiting

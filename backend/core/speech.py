@@ -167,9 +167,14 @@ def generate_spoken_message(
         any(k in full_context for k in ("google form", "create form", "build form", "fill form", "submit form"))
     )
     is_app_open = (
-        any(k in full_context for k in ("open chrome", "open edge", "open app", "launch", "open application"))
-        and any(t in ("run_command", "activate_window") for t in tools_used)
-    )
+        any(k in full_context for k in (
+            "open chrome", "open edge", "open app", "launch", "open application",
+            "open calculator", "launch calculator", "open calc", "launch calc",
+            "open notepad", "launch notepad", "open spotify", "open vs code", "open vscode", "open code",
+            "open terminal", "open powershell", "open paint", "open word", "open excel"
+        ))
+        or any(k in full_context for k in ("open ", "launch ", "start ", "bring up "))
+    ) and any(t in ("run_command", "activate_window") for t in tools_used)
     is_deep_research = (
         any("deep_research" in t for t in tools_used)
         or any(k in full_context for k in ("deep research", "research on", "research about"))
@@ -228,6 +233,10 @@ def generate_spoken_message(
         return "I have successfully saved the file to your desktop."
 
     if is_app_open:
+        for app in ("calculator", "calc", "notepad", "chrome", "edge", "spotify", "vs code", "vscode", "terminal", "powershell", "paint", "word", "excel"):
+            if app in full_context:
+                display_name = "VS Code" if app in ("vs code", "vscode", "code") else ("Calculator" if app in ("calc", "calculator") else app.capitalize())
+                return f"I have opened {display_name} for you."
         return "I have opened the application for you."
 
     # 3. Conversational / Q&A / Search Tasks: Extract clean sentence from response
@@ -268,10 +277,27 @@ async def generate_spoken_brief(
             error=error,
         )
 
-    # 2. If it's a known high-value desktop tool task (excel, word, file, email) without a long QA response:
+    # 2. If it's a known desktop action tool or deterministic plan, use instant spoken message generation (<0.1ms)
     tools_used = [str(s.get("tool", "")).lower() for s in (plan or [])]
-    is_action_task = any(t in ("spreadsheet_create", "spreadsheet_open", "word_create", "word_open", "write_file", "send_email") for t in tools_used)
-    if is_action_task and (not final_response or len(final_response) < 150):
+    deterministic_tools = {
+        "spreadsheet_create", "spreadsheet_open", "spreadsheet_save", "spreadsheet_verify",
+        "spreadsheet_write_range", "spreadsheet_format_range", "spreadsheet_create_table",
+        "word_create", "word_open", "write_file", "delete_file", "send_email",
+        "document_create", "document_save", "document_verify", "document_add_title",
+        "document_add_heading", "document_add_paragraph", "document_add_bullet",
+        "run_command", "activate_window", "press_hotkey", "type_text", "press_key", "click_mouse",
+        "play_music", "media_control", "get_current_time"
+    }
+    is_action_task = any(t in deterministic_tools for t in tools_used)
+    if is_action_task and (
+        all(t in deterministic_tools for t in tools_used)
+        or not final_response
+        or len(final_response) < 250
+        or any(p in (final_response or "").lower() for p in (
+            "successfully executed", "launched application", "verified process",
+            "created the document", "created the excel", "saved the file", "opened "
+        ))
+    ):
         return generate_spoken_message(
             goal=goal,
             user_input=user_input,

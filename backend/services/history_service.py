@@ -54,26 +54,32 @@ class HistoryPersistenceService:
                 if session is None:
                     return
                 repo = TaskRepository(session)
-                task = await repo.upsert_task(
-                    task_id_str=task_id_str,
-                    user_id=user_id,
-                    user_prompt=user_prompt,
-                    goal=goal,
-                    task_type=category,
-                    status="running",
-                    model_used=model_used,
-                    metadata=metadata,
+                task = await asyncio.wait_for(
+                    repo.upsert_task(
+                        task_id_str=task_id_str,
+                        user_id=user_id,
+                        user_prompt=user_prompt,
+                        goal=goal,
+                        task_type=category,
+                        status="running",
+                        model_used=model_used,
+                        metadata=metadata,
+                    ),
+                    timeout=5.0,
                 )
-                await repo.add_event(
-                    task_id=task.id,
-                    user_id=user_id,
-                    event_type="task_started",
-                    application=detect_application(intent or "General"),
-                    status="success",
-                    metadata={"goal": goal, "intent": intent},
+                await asyncio.wait_for(
+                    repo.add_event(
+                        task_id=task.id,
+                        user_id=user_id,
+                        event_type="task_started",
+                        application=detect_application(intent or "General"),
+                        status="success",
+                        metadata={"goal": goal, "intent": intent},
+                    ),
+                    timeout=5.0,
                 )
         except Exception as exc:
-            logger.warning(f"[Persistence] Background task start write failed (continuing locally): {exc}")
+            logger.debug(f"[Persistence] Background task start write skipped/transient: {exc}")
 
     @staticmethod
     def persist_step_event_bg(
@@ -111,7 +117,7 @@ class HistoryPersistenceService:
                 if session is None:
                     return
                 repo = TaskRepository(session)
-                task = await repo.get_by_task_id(task_id_str, user_id)
+                task = await asyncio.wait_for(repo.get_by_task_id(task_id_str, user_id), timeout=5.0)
                 if not task:
                     return
 
@@ -120,18 +126,21 @@ class HistoryPersistenceService:
                 if metadata:
                     event_meta.update(sanitize_value(metadata))
 
-                await repo.add_event(
-                    task_id=task.id,
-                    user_id=user_id,
-                    event_type=event_type,
-                    tool_name=tool_name,
-                    application=app,
-                    status=status,
-                    duration_ms=duration_ms,
-                    metadata=event_meta,
+                await asyncio.wait_for(
+                    repo.add_event(
+                        task_id=task.id,
+                        user_id=user_id,
+                        event_type=event_type,
+                        tool_name=tool_name,
+                        application=app,
+                        status=status,
+                        duration_ms=duration_ms,
+                        metadata=event_meta,
+                    ),
+                    timeout=5.0,
                 )
         except Exception as exc:
-            logger.warning(f"[Persistence] Background step event write failed: {exc}")
+            logger.debug(f"[Persistence] Background step event write skipped/transient: {exc}")
 
     @staticmethod
     def persist_task_completion_bg(
@@ -167,25 +176,31 @@ class HistoryPersistenceService:
                 if session is None:
                     return
                 repo = TaskRepository(session)
-                task = await repo.update_task_completion(
-                    task_id_str=task_id_str,
-                    user_id=user_id,
-                    status=status,
-                    final_response=final_response,
-                    error=error,
-                    step_count=step_count,
-                    metadata=metadata,
+                task = await asyncio.wait_for(
+                    repo.update_task_completion(
+                        task_id_str=task_id_str,
+                        user_id=user_id,
+                        status=status,
+                        final_response=final_response,
+                        error=error,
+                        step_count=step_count,
+                        metadata=metadata,
+                    ),
+                    timeout=5.0,
                 )
                 if task:
-                    await repo.add_event(
-                        task_id=task.id,
-                        user_id=user_id,
-                        event_type="task_completed" if status == "completed" else "task_failed",
-                        status="success" if status == "completed" else "failed",
-                        metadata={"error": error} if error else None,
+                    await asyncio.wait_for(
+                        repo.add_event(
+                            task_id=task.id,
+                            user_id=user_id,
+                            event_type="task_completed" if status == "completed" else "task_failed",
+                            status="success" if status == "completed" else "failed",
+                            metadata={"error": error} if error else None,
+                        ),
+                        timeout=5.0,
                     )
         except Exception as exc:
-            logger.warning(f"[Persistence] Background task completion write failed: {exc}")
+            logger.debug(f"[Persistence] Background task completion write skipped/transient: {exc}")
 
 
 history_service = HistoryPersistenceService()

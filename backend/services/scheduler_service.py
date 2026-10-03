@@ -88,7 +88,7 @@ class SchedulerService:
                 if session is None:
                     return
                 repo = ScheduledTaskRepository(session)
-                due_tasks = await repo.get_due_tasks(now_utc)
+                due_tasks = await asyncio.wait_for(repo.get_due_tasks(now_utc), timeout=6.0)
                 if not due_tasks:
                     return
 

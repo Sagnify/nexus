@@ -92,8 +92,8 @@ def get_engine() -> Optional[AsyncEngine]:
             query.pop(key, None)
 
         connect_args = {
-            "timeout": 30.0,
-            "command_timeout": 30.0,
+            "timeout": 8.0,
+            "command_timeout": 10.0,
             "server_settings": {
                 "tcp_keepalives_idle": "60",
                 "tcp_keepalives_interval": "10",
@@ -116,12 +116,7 @@ def get_engine() -> Optional[AsyncEngine]:
         _engine = create_async_engine(
             clean_url,
             echo=False,
-            pool_size=5,
-            max_overflow=10,
-            pool_pre_ping=True,
-            pool_recycle=45,
-            pool_timeout=30.0,
-            pool_reset_on_return="rollback",
+            poolclass=NullPool,
             connect_args=connect_args,
         )
         _session_factory = async_sessionmaker(
@@ -220,22 +215,46 @@ async def safe_db_context() -> AsyncGenerator[Optional[AsyncSession], None]:
             try:
                 session_yielded = True
                 yield session
-                await session.commit()
+                # Only execute commit if session is active and has pending changes (dirty, new, or deleted)
+                if session.is_active and (session.dirty or session.new or session.deleted):
+                    await asyncio.wait_for(session.commit(), timeout=6.0)
             except Exception as exc:
                 try:
                     await session.rollback()
                 except Exception:
                     pass
-                lower_err = str(exc).lower()
-                if any(w in lower_err for w in ("10054", "forcibly closed", "connection reset", "broken pipe", "cancelled")):
-                    logger.debug(f"[Database] Connection reset in context: {exc}")
+                exc_type = type(exc).__name__
+                err_msg = str(exc) or exc_type
+                lower_err = (err_msg + " " + exc_type).lower()
+                is_transient = (
+                    isinstance(exc, (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError, ConnectionResetError, OSError))
+                    or any(w in lower_err for w in (
+                        "10054", "forcibly closed", "connection reset", "broken pipe", "cancelled",
+                        "timeout", "time out", "connection was closed", "authentication timed out",
+                        "terminating connection", "server closed the connection", "operationalerror",
+                        "cannot connect", "getaddrinfo failed"
+                    ))
+                )
+                if is_transient:
+                    logger.debug(f"[Database] Transient connection drop/timeout in context: {err_msg}")
                 else:
-                    logger.warning(f"[Database] Session error in context: {exc}")
+                    logger.warning(f"[Database] Session error in context: {err_msg}")
     except Exception as outer_exc:
         if not session_yielded:
             yield None
-        lower_err = str(outer_exc).lower()
-        if any(w in lower_err for w in ("10054", "forcibly closed", "connection reset", "broken pipe", "cancelled")):
-            logger.debug(f"[Database] Transient connection reset opening session: {outer_exc}")
+        outer_type = type(outer_exc).__name__
+        err_msg = str(outer_exc) or outer_type
+        lower_err = (err_msg + " " + outer_type).lower()
+        is_transient = (
+            isinstance(outer_exc, (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError, ConnectionResetError, OSError))
+            or any(w in lower_err for w in (
+                "10054", "forcibly closed", "connection reset", "broken pipe", "cancelled",
+                "timeout", "time out", "connection was closed", "authentication timed out",
+                "terminating connection", "server closed the connection", "operationalerror",
+                "cannot connect", "getaddrinfo failed"
+            ))
+        )
+        if is_transient:
+            logger.debug(f"[Database] Transient connection reset opening session: {err_msg}")
         else:
-            logger.warning(f"[Database] Error in safe_db_context: {outer_exc}")
+            logger.warning(f"[Database] Error in safe_db_context: {err_msg}")

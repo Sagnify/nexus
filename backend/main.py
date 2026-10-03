@@ -58,6 +58,13 @@ async def lifespan(app: FastAPI):
         await connector_manager.initialize_connected_tools("default")
     except Exception as e:
         logger.warning(f"Could not initialize connectors on startup: {e}")
+    # Asynchronously warm up the serverless database connection in the background
+    try:
+        import asyncio
+        from backend.database.session import check_db_connection
+        asyncio.create_task(check_db_connection())
+    except Exception:
+        pass
     await scheduler_service.start()
     yield
     await scheduler_service.stop()

@@ -233,8 +233,31 @@ def verify_process_outcome(app_name: str) -> OutcomeValidationResult:
     }
     target_exe = exe_map.get(clean_name, f"{clean_name}.exe")
 
+    # Fast-path process table check via psutil (<5ms)
     try:
-        # Use Windows tasklist directly
+        import psutil
+        for proc in psutil.process_iter(['name']):
+            try:
+                pname = (proc.info.get('name') or proc.name() or "").lower()
+                if (
+                    clean_name in pname
+                    or target_exe.lower() in pname
+                    or (clean_name in ("calc", "calculator") and "calc" in pname)
+                ):
+                    return OutcomeValidationResult(
+                        passed=True,
+                        confidence=0.99,
+                        reason=f"Verified process '{proc.name()}' is actively running in Windows.",
+                        tier="ground_truth",
+                        details={"process": proc.name(), "running": True},
+                    )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+
+    try:
+        # Fallback to Windows tasklist if psutil is unavailable
         cmd = f'tasklist /FI "IMAGENAME eq {target_exe}" /NH'
         out = subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL)
         is_running = target_exe.lower() in out.lower()

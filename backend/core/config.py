@@ -85,7 +85,7 @@ def get_spotify_client_id() -> str | None:
 _GROQ_MODEL_DEFAULTS = {
     "fast": "openai/gpt-oss-20b",        # Fast single-step LPU inference (high OTPM headroom)
     "reasoning": "openai/gpt-oss-20b",   # Reasoning model
-    "vision": "llama-3.2-11b-vision-preview",  # Vision-capable model
+    "vision": "openai/gpt-oss-20b",      # Fallback model (vision routed to Google AI Studio)
     "tool": "openai/gpt-oss-20b",        # Tool/function calling
 }
 
@@ -95,6 +95,7 @@ _DECOMMISSIONED_FRAGMENTS = (
     "mixtral-8x7b", "mixtral-8x22b",
     "llama2", "codellama", "compound",
     "llama-3.1-8b-instant", "llama-3.2-8b",
+    "llama-3.2-11b", "llama-3.2-90b", "vision-preview",
 )
 
 

@@ -27,6 +27,7 @@ export interface ElectronAPI {
   openPath: (filePath: string) => Promise<string>;
   openExternal: (url: string) => void;
   resizeExcelCopilot?: (hwnd: number, width: number, height: number) => void;
+  resizeWordCopilot?: (hwnd: number, width: number, height: number) => void;
   platform: string;
 }
 
@@ -109,6 +110,8 @@ const api: ElectronAPI = {
   },
   resizeExcelCopilot: (hwnd: number, width: number, height: number) =>
     ipcRenderer.send('excel-copilot-resize', { hwnd, width, height }),
+  resizeWordCopilot: (hwnd: number, width: number, height: number) =>
+    ipcRenderer.send('word-copilot-resize', { hwnd, width, height }),
   platform: process.platform,
 };
 

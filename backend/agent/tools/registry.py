@@ -84,6 +84,14 @@ from backend.agent.tools.excel_copilot import (
     ExcelDataCleanupTool,
     ExcelInspectTool,
 )
+from backend.agent.tools.word_copilot.tools import (
+    WordFormatTextTool,
+    WordClipboardOpTool,
+    WordFindReplaceTool,
+    WordFormatParagraphTool,
+    WordInsertTool,
+    WordPresentationTool,
+)
 
 
 
@@ -217,6 +225,13 @@ def create_registry() -> ToolRegistry:
     r.register(ExcelConditionalFormatTool())
     r.register(ExcelDataCleanupTool())
     r.register(ExcelInspectTool())
+    # Floating Word Copilot Tools
+    r.register(WordFormatTextTool())
+    r.register(WordClipboardOpTool())
+    r.register(WordFindReplaceTool())
+    r.register(WordFormatParagraphTool())
+    r.register(WordInsertTool())
+    r.register(WordPresentationTool())
     # Hardware & GUI Automation Tools (Fallback / OS Controls)
     r.register(PressHotkeyTool())
     r.register(TypeTextTool())

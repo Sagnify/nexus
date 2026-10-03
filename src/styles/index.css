@@ -57,7 +57,9 @@ html, body, #root {
 }
 
 body.excel-copilot-view,
-body.excel-copilot-view #root {
+body.excel-copilot-view #root,
+body.word-copilot-view,
+body.word-copilot-view #root {
   width: 100% !important;
   height: 100% !important;
   display: flex !important;

@@ -157,7 +157,7 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
     ]
 
     for connector_id, keywords, tool_names in connector_matches:
-        if connector_id == "filesystem" and any(w in lower for w in ("excel", "xlsx", "spreadsheet", "csv", "docx", "word doc", "word document", "powerpoint", "presentation", "slides", "ppt")):
+        if connector_id == "filesystem" and any(w in lower for w in ("excel", "xlsx", "spreadsheet", "csv", "docx", "word doc", "word document", "word file", "word report", "word", "document", "powerpoint", "presentation", "slides", "ppt")):
             continue
         if not any(keyword in lower for keyword in keywords):
             continue
@@ -1804,7 +1804,7 @@ async def _try_fast_path_plan(
         return plan
 
     # 8. Document & Research Report Generation Fallback
-    if any(w in lower for w in ("docx", "word doc", "word document", "report in word", "pdf document", "excel document", "spreadsheet report", "csv report")) and any(w in lower for w in ("write", "create", "make", "generate", "build", "save", "export", "file", "report")):
+    if any(w in lower for w in ("docx", "word doc", "word document", "word file", "word report", "report in word", "pdf document", "excel document", "spreadsheet report", "csv report")) and any(w in lower for w in ("write", "create", "make", "generate", "build", "save", "export", "file", "report")):
         # If this is any kind of research, analysis, topic overview, or substantive inquiry:
         if any(w in lower for w in ("research", "study", "analysis", "in-depth", "deep", "investigate", "history", "industrialization", "market", "economy", "citations", "sources", "overview of", "summary of", "findings")):
             clean_topic = _extract_clean_research_topic(goal)
@@ -2289,13 +2289,25 @@ async def planner_node(state: NexusState) -> dict:
                 from backend.core.firebase_auth import LOCAL_USER_ID
                 uid = LOCAL_USER_ID
 
-            async with session_factory() as db_session:
-                if uid:
+            from backend.database.session import safe_db_context
+            import asyncio
+            async with safe_db_context() as db_session:
+                if uid and db_session:
                     from backend.agent.skills.matcher import matcher
                     from backend.agent.skills.runtime import runtime
-                    matched = await matcher.match_skill(goal or state.get("user_input", ""), uid, db_session)
-                    if not matched and uid != LOCAL_USER_ID:
-                        matched = await matcher.match_skill(goal or state.get("user_input", ""), LOCAL_USER_ID, db_session)
+                    try:
+                        matched = await asyncio.wait_for(
+                            matcher.match_skill(goal or state.get("user_input", ""), uid, db_session),
+                            timeout=3.0,
+                        )
+                        if not matched and uid != LOCAL_USER_ID:
+                            matched = await asyncio.wait_for(
+                                matcher.match_skill(goal or state.get("user_input", ""), LOCAL_USER_ID, db_session),
+                                timeout=3.0,
+                            )
+                    except (TimeoutError, asyncio.TimeoutError):
+                        logger.debug("[Planner] Learned skill matching timed out (continuing with planner).")
+                        matched = None
 
                     if matched and not matched.is_ambiguous:
                         # Suppress legacy web-automation skills if a real API connector is active
@@ -2445,7 +2457,7 @@ async def planner_node(state: NexusState) -> dict:
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "top", "list", "file", "for"))
     )
     is_docx_creation_query = (
-        any(w in lower_goal for w in ("docx", "word doc", "word document", "report in word")) and
+        any(w in lower_goal for w in ("docx", "word doc", "word document", "word file", "word report", "report in word")) and
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "report", "file", "for"))
     )
     is_file_creation_query = (
@@ -2599,7 +2611,7 @@ async def planner_node(state: NexusState) -> dict:
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "top", "list", "file"))
     )
     is_docx_creation_query = (
-        any(w in lower_goal for w in ("docx", "word doc", "word document", "report in word")) and
+        any(w in lower_goal for w in ("docx", "word doc", "word document", "word file", "word report", "report in word")) and
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "report", "file"))
     )
     is_file_creation_query = (
@@ -2617,7 +2629,7 @@ async def planner_node(state: NexusState) -> dict:
             elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
                 plan_data = await _build_dynamic_spreadsheet_plan(goal, has_api_key)
 
-            elif is_docx_creation_query or "docx" in lower_goal:
+            elif is_docx_creation_query or "docx" in lower_goal or "word file" in lower_goal or "word doc" in lower_goal:
                 fast_docx = await _try_fast_path_plan(goal, "file_op", state_messages=state.get("messages"))
                 if fast_docx:
                     plan_data = _ensure_step_fields(fast_docx)
@@ -2653,7 +2665,7 @@ async def planner_node(state: NexusState) -> dict:
             plan_data = _build_google_forms_plan(goal)
         elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
             plan_data = await _build_dynamic_spreadsheet_plan(goal, has_api_key)
-        elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal:
+        elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal or "word file" in lower_goal:
             fast_docx = await _try_fast_path_plan(goal, "file_op", state_messages=state.get("messages"))
             if fast_docx:
                 plan_data = _ensure_step_fields(fast_docx)

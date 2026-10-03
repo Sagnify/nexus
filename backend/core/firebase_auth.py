@@ -157,6 +157,7 @@ _fallback_local_user = User(
 )
 _cached_local_user: Optional[User] = None
 _user_token_cache: dict[str, tuple[float, User]] = {}
+_auth_lock = asyncio.Lock()
 
 
 async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, Any]) -> User:
@@ -164,9 +165,10 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
     uid = claims["uid"]
     now = time.time()
 
+    # Fast-path: return cached user without DB query or lock overhead
     if uid in _user_token_cache:
         cached_time, cached_user = _user_token_cache[uid]
-        if now - cached_time < 60:
+        if now - cached_time < 300:
             claims_name = claims.get("name")
             claims_email = claims.get("email")
             if (not claims_name or cached_user.display_name == claims_name) and (not claims_email or cached_user.email == claims_email):
@@ -185,10 +187,20 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
         _user_token_cache[uid] = (now, fallback_user)
         return fallback_user
 
-    if session is not None:
+    # Serialize concurrent resolution on startup/cold-boot to avoid duplicate DB queries
+    async with _auth_lock:
+        now = time.time()
+        if uid in _user_token_cache:
+            cached_time, cached_user = _user_token_cache[uid]
+            if now - cached_time < 300:
+                claims_name = claims.get("name")
+                claims_email = claims.get("email")
+                if (not claims_name or cached_user.display_name == claims_name) and (not claims_email or cached_user.email == claims_email):
+                    return cached_user
+
         try:
             stmt = select(User).where(User.firebase_uid == uid)
-            result = await session.execute(stmt)
+            result = await asyncio.wait_for(session.execute(stmt), timeout=8.0)
             user = result.scalar_one_or_none()
 
             if user is None:
@@ -200,7 +212,7 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
                     profile_image_url=claims.get("picture"),
                 )
                 session.add(user)
-                await session.flush()
+                await asyncio.wait_for(session.flush(), timeout=8.0)
                 logger.info(f"[Auth] Created new user {user.id} for firebase_uid={uid}")
             else:
                 # Update mutable profile fields if changed
@@ -215,21 +227,21 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
                     user.profile_image_url = claims["picture"]
                     dirty = True
                 if dirty:
-                    await session.flush()
+                    await asyncio.wait_for(session.flush(), timeout=8.0)
 
             _user_token_cache[uid] = (now, user)
             return user
         except Exception as exc:
-            lower_exc = str(exc).lower()
+            err_msg = str(exc) or repr(exc) or type(exc).__name__
+            lower_exc = err_msg.lower()
             if any(w in lower_exc for w in ("10054", "forcibly closed", "connection reset", "broken pipe")):
-                logger.debug(f"[Auth] Database connection reset resolving user {uid}, using resilient fallback: {exc}")
+                logger.debug(f"[Auth] Database connection reset resolving user {uid}, using resilient fallback: {err_msg}")
+            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                logger.info(f"[Auth] Database connection timed out resolving user {uid}; using fallback user.")
             else:
-                logger.warning(f"[Auth] Database connection issue resolving user {uid}, using resilient fallback: {exc}")
+                logger.warning(f"[Auth] Database connection issue resolving user {uid}, using resilient fallback: {err_msg}")
             _user_token_cache[uid] = (now, fallback_user)
             return fallback_user
-
-    _user_token_cache[uid] = (now, fallback_user)
-    return fallback_user
 
 
 async def get_or_create_local_user(session: Optional[AsyncSession] = None) -> User:
