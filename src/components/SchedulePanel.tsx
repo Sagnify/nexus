@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Search,
   Info,
+  Laptop,
   FileText,
   Mail,
   FileSpreadsheet,
@@ -28,17 +29,20 @@ import {
 interface SchedulePanelProps {
   onClose: () => void;
   onRunPrompt?: (prompt: string) => void;
+  onOpenResponse?: (taskId: string) => void;
 }
 
-export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunPrompt }) => {
+export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunPrompt, onOpenResponse }) => {
   const {
     tasks,
+    deviceId,
     loading,
     error,
     togglePause,
     runNow,
     deleteTask,
     fetchRuns,
+    moveToThisDevice,
   } = useSchedules();
 
   const [activeTab, setActiveTab] = useState<'all' | 'active' | 'paused' | 'reminder' | 'automation'>('all');
@@ -70,6 +74,17 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
       setTimeout(() => setActionFeedback(null), 3000);
     } catch (err: any) {
       setActionFeedback({ id: taskId, message: err?.message || 'Execution failed' });
+      setTimeout(() => setActionFeedback(null), 3000);
+    }
+  };
+
+  const handleMoveToThisDevice = async (task: ScheduledTaskData) => {
+    try {
+      await moveToThisDevice(task.id);
+      setActionFeedback({ id: task.id, message: 'Schedule assigned to this device' });
+      setTimeout(() => setActionFeedback(null), 3000);
+    } catch (err: any) {
+      setActionFeedback({ id: task.id, message: err?.message || 'Failed to assign device' });
       setTimeout(() => setActionFeedback(null), 3000);
     }
   };
@@ -124,6 +139,22 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
     if (def.frequency === 'weekly') {
       const days = (def.days || ['monday']).map((d) => d.slice(0, 3).toUpperCase()).join(', ');
       return `Every ${days} at ${def.time || '10:00'}`;
+    }
+    if (def.frequency === 'interval') {
+      const minutes = Math.max(1, def.interval_minutes || 60);
+      if (minutes % 10080 === 0) {
+        const weeks = minutes / 10080;
+        return `Every ${weeks} week${weeks === 1 ? '' : 's'}`;
+      }
+      if (minutes % 1440 === 0) {
+        const days = minutes / 1440;
+        return `Every ${days} day${days === 1 ? '' : 's'}`;
+      }
+      if (minutes % 60 === 0) {
+        const hours = minutes / 60;
+        return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
+      }
+      return `Every ${minutes} minute${minutes === 1 ? '' : 's'}`;
     }
     if (def.frequency === 'monthly') return `Monthly on day ${def.day_of_month || 1} at ${def.time || '09:00'}`;
     return 'Recurring';
@@ -350,6 +381,17 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
                           {formatScheduleFriendly(task.schedule_definition, task.schedule_type)}
                         </span>
 
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider border ${
+                            task.device_id === deviceId
+                              ? 'bg-emerald-500/10 text-emerald-300 border-emerald-400/20'
+                              : 'bg-amber-500/10 text-amber-300 border-amber-400/20'
+                          }`}
+                          title={task.device_id === deviceId ? 'Runs and notifies on this device' : 'Will not run on this device'}
+                        >
+                          {task.device_id === deviceId ? 'This device' : task.device_id === 'unbound' ? 'Choose device' : 'Other device'}
+                        </span>
+
                         {task.last_run_status === 'blocked' && (
                           <span className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
                             <AlertTriangle className="w-2.5 h-2.5" />
@@ -388,6 +430,16 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
 
                   {/* Actions Column: Slider Toggle, Run Now, Runs History, Delete */}
                   <div className="flex items-center gap-2.5 flex-shrink-0 pt-0.5">
+                    {task.device_id !== deviceId && (
+                      <button
+                        type="button"
+                        onClick={() => handleMoveToThisDevice(task)}
+                        className="h-7 px-2 rounded-lg flex items-center gap-1 text-[10px] font-semibold text-amber-200 bg-amber-500/10 border border-amber-400/20 hover:bg-amber-500/20"
+                        title="Move this schedule to this computer"
+                      >
+                        <Laptop className="w-3 h-3" /> Move here
+                      </button>
+                    )}
                     {/* Activate / Deactivate Slider Toggle [ ON ] / [ OFF ] */}
                     <button
                       type="button"
@@ -421,10 +473,20 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
                     <button
                       type="button"
                       onClick={() => handleRunNow(task.id)}
-                      className="p-1.5 rounded-lg text-white/50 hover:text-emerald-300 hover:bg-emerald-500/15 transition-colors border border-transparent hover:border-emerald-500/25"
+                      disabled={task.device_id !== deviceId}
+                      className={`p-1.5 rounded-lg border border-transparent transition-colors ${task.device_id === deviceId ? 'text-white/50 hover:text-emerald-300 hover:bg-emerald-500/15 hover:border-emerald-500/25' : 'text-white/20 cursor-not-allowed'}`}
                       title="Run immediately"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenResponse?.(task.id)}
+                      className="p-1.5 rounded-lg text-white/50 hover:text-sky-300 hover:bg-sky-500/15 transition-colors border border-transparent hover:border-sky-500/25"
+                      title="Open latest response"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
                     </button>
 
                     {/* Execution Runs Drawer */}

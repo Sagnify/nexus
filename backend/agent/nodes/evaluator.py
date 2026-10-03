@@ -421,27 +421,37 @@ async def evaluator_node(state: NexusState) -> dict:
         step_summaries.append(f"- **{s.get('title')}** ({s.get('tool')}): {res}")
     results_text = "\n".join(step_summaries)
 
-    # If the single step was ai_response, deep_research, or media tools, verify live status before completing
-    if len(plan) == 1 and plan[0].get("tool") in ("ai_response", "deep_research", "play_music", "media_control"):
+    # Single-step read-only connector results are already formatted for display. Preserve them rather than
+    # sending them through a second model, which wastes tokens and can obscure links and message IDs.
+    if len(plan) == 1 and plan[0].get("tool") in ("ai_response", "deep_research", "play_music", "media_control", "gmail_list_messages", "gmail_brief_messages"):
         res = plan[0].get("result") or plan[0].get("error") or "Task completed."
         is_media = plan[0].get("tool") in ("play_music", "media_control")
         is_failed = False
         if is_media and plan[0].get("tool") == "play_music":
             try:
-                import re
-                from backend.agent.tools.system.media_tool import _get_smtc_media_info
-                smtc = _get_smtc_media_info()
-                target_q = plan[0].get("args", {}).get("query", "") or user_input
-                q_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", target_q) if len(w) > 2]
-                stop_words = {"song", "track", "music", "play", "from", "the", "and", "audio", "listen", "hits", "single"}
-                q_tokens = [w for w in q_words if w not in stop_words] or q_words
-                ttl = (smtc.get("title") or "").lower()
-                art = (smtc.get("artist") or "").lower()
-                alb = (smtc.get("album") or "").lower()
-                matches = any(tok in ttl or tok in art or tok in alb for tok in q_tokens) if q_tokens else True
-                if plan[0].get("status") == "failed" or (smtc.get("status") != "Playing") or not matches:
-                    if "Verified" not in str(res):
+                args = plan[0].get("args", {})
+                svc = (args.get("service") or "spotify").lower().strip()
+                prefer_desktop = args.get("prefer_desktop", True)
+                if svc == "spotify" and prefer_desktop:
+                    import re
+                    from backend.agent.tools.system.media_tool import _get_smtc_media_info
+                    smtc = _get_smtc_media_info()
+                    target_q = args.get("query", "") or user_input
+                    q_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", target_q) if len(w) > 2]
+                    stop_words = {"song", "track", "music", "play", "from", "the", "and", "audio", "listen", "hits", "single"}
+                    q_tokens = [w for w in q_words if w not in stop_words] or q_words
+                    ttl = (smtc.get("title") or "").lower()
+                    art = (smtc.get("artist") or "").lower()
+                    alb = (smtc.get("album") or "").lower()
+                    matches = any(tok in ttl or tok in art or tok in alb for tok in q_tokens) if q_tokens else True
+                    if plan[0].get("status") == "failed":
                         is_failed = True
+                    elif smtc.get("status") == "Playing" and matches:
+                        is_failed = False
+                    elif "Verified" not in str(res) and plan[0].get("status") == "failed":
+                        is_failed = True
+                elif plan[0].get("status") == "failed":
+                    is_failed = True
             except Exception:
                 if plan[0].get("status") == "failed":
                     is_failed = True

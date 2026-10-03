@@ -1,6 +1,12 @@
 import pytest
 import os
 import tempfile
+import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from backend.agent.nodes import planner
+from backend.agent.nodes.intent import intent_node
+from backend.agent.skills.matcher import SkillMatcher, SkillRepository
 from backend.agent.router.fastpath_router import match_fastpath_plan
 from backend.agent.router.plan_cache import get_cached_plan, extract_template_signature
 from backend.agent.validation.outcome_validator import (
@@ -55,7 +61,7 @@ def test_fastpath_math_and_system():
 
 def test_plan_cache_word_template():
     """Verify normalized template retrieval for docx creation."""
-    cached_plan = get_cached_plan("create a word report on AI Agents")
+    cached_plan = get_cached_plan("create a word report template on AI Agents")
     assert cached_plan is not None
     assert len(cached_plan) >= 3
     tools = [s["tool"] for s in cached_plan]
@@ -66,7 +72,7 @@ def test_plan_cache_word_template():
 
 def test_plan_cache_excel_template():
     """Verify normalized template retrieval for excel sheet creation."""
-    cached_plan = get_cached_plan("create an excel spreadsheet for Budget 2026")
+    cached_plan = get_cached_plan("create an excel spreadsheet template for Budget 2026")
     assert cached_plan is not None
     assert len(cached_plan) >= 2
     tools = [s["tool"] for s in cached_plan]
@@ -76,9 +82,150 @@ def test_plan_cache_excel_template():
 
 def test_plan_cache_signature():
     """Verify runtime signature extraction."""
-    sig, params = extract_template_signature("create a word document on Quantum Computing")
+    sig, params = extract_template_signature("create a word document template on Quantum Computing")
     assert sig == "create_word_report"
     assert "Quantum" in params.get("topic", "")
+
+
+@pytest.mark.asyncio
+async def test_word_file_request_generates_and_saves_docx_without_automation(monkeypatch):
+    prompt = "make a word file on AI agent of about 3 pages"
+    llm_call = AsyncMock(return_value=SimpleNamespace(content=(
+        "# AI Agents\n\n## Overview\nAI agents perceive and act on their environment.\n\n"
+        "## Architecture\nAn agent combines a model, tools, memory, and an execution loop."
+    )))
+    monkeypatch.setattr(planner, "_try_match_user_skill", AsyncMock(return_value=None))
+    monkeypatch.setattr(planner, "_build_active_connector_priority_plan", AsyncMock(return_value=[]))
+    monkeypatch.setattr(planner, "get_groq_api_key", lambda: "test-key")
+    monkeypatch.setattr(planner, "get_gemma_api_key", lambda: None)
+    monkeypatch.setattr(planner, "ainvoke_with_dynamic_switch", llm_call)
+    monkeypatch.setattr(
+        "backend.services.schedule_parser.schedule_parser.parse",
+        AsyncMock(return_value=None),
+    )
+
+    result = await planner.planner_node({"goal": prompt, "user_input": prompt, "intent": "file_op"})
+    tools = [step["tool"] for step in result["plan"]]
+
+    assert llm_call.await_count == 1
+    assert "approximately 1200 words" in llm_call.await_args.args[0][1].content
+    assert tools[0] == "document_create"
+    assert "document_add_title" in tools
+    assert "document_add_heading" in tools
+    assert "document_add_paragraph" in tools
+    assert tools[-2:] == ["document_save", "document_verify"]
+    assert not any(tool.startswith(("browser_", "click_", "type_", "press_")) for tool in tools)
+
+
+@pytest.mark.asyncio
+async def test_ppt_file_request_generates_and_saves_without_ui_automation(monkeypatch):
+    prompt = "make a ppt file about AI agents"
+    monkeypatch.setattr(planner, "_try_match_user_skill", AsyncMock(return_value=None))
+    monkeypatch.setattr(planner, "_build_active_connector_priority_plan", AsyncMock(return_value=[]))
+    monkeypatch.setattr(planner, "get_groq_api_key", lambda: "test-key")
+    monkeypatch.setattr(planner, "get_gemma_api_key", lambda: None)
+    monkeypatch.setattr(
+        "backend.services.schedule_parser.schedule_parser.parse",
+        AsyncMock(return_value=None),
+    )
+
+    result = await planner.planner_node({"goal": prompt, "user_input": prompt, "intent": "file_op"})
+    plan = result["plan"]
+    tools = [step["tool"] for step in plan]
+    create_step = next(step for step in plan if step["tool"] == "presentation_create")
+    save_step = next(step for step in plan if step["tool"] == "presentation_save")
+
+    assert tools == ["presentation_create", "presentation_save", "presentation_verify"]
+    assert create_step["args"]["topic"] == "AI agents"
+    assert create_step["args"]["include_images"] is False
+    assert save_step["args"]["path"].startswith("Desktop/")
+    assert save_step["args"]["reveal"] is False
+
+
+@pytest.mark.parametrize("prompt", [
+    "make a word file on AI agents about 3 pages",
+    "create an excel file about AI agents",
+    "make a ppt file about AI agents",
+])
+@pytest.mark.asyncio
+async def test_office_file_creation_overrides_active_browser_and_learned_skills(prompt, monkeypatch):
+    intent = await intent_node({
+        "user_input": prompt,
+        "active_target": {"target_type": "browser", "application": "Chrome"},
+    })
+    assert intent["intent"] == "file_op"
+    assert intent["selected_model"] == "artifact-creation-fastpath"
+
+    skills_lookup = AsyncMock()
+    monkeypatch.setattr(SkillRepository, "get_active_skills_for_matching", skills_lookup)
+    match = await SkillMatcher().match_skill(prompt, uuid.uuid4(), None)
+    assert match is None
+    skills_lookup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unscoped_status_events_stay_with_their_workflow(monkeypatch):
+    from backend.api import nexus as nexus_api
+
+    class CaptureQueue:
+        def __init__(self):
+            self.events = []
+
+        async def put(self, event):
+            self.events.append(event)
+
+    file_queue = CaptureQueue()
+    browser_queue = CaptureQueue()
+    monkeypatch.setattr(nexus_api, "_task_queues", {"file-task": file_queue, "browser-task": browser_queue})
+    monkeypatch.setattr(nexus_api, "_task_states", {
+        "file-task": {"execution_status": "executing"},
+        "browser-task": {"execution_status": "executing"},
+    })
+
+    token = nexus_api._current_workflow_task_id.set("file-task")
+    try:
+        await nexus_api.push_event(None, "status", {"status": "executing", "message": "Generating document"})
+    finally:
+        nexus_api._current_workflow_task_id.reset(token)
+
+    assert len(file_queue.events) == 1
+    assert browser_queue.events == []
+
+    await nexus_api.push_event(None, "status", {"status": "executing", "message": "Unattributed event"})
+    assert len(file_queue.events) == 1
+    assert browser_queue.events == []
+
+
+@pytest.mark.asyncio
+async def test_gmail_read_request_cannot_become_an_outgoing_email(monkeypatch):
+    from backend.agent.tools.registry import tool_registry
+    from backend.connectors.credentials_store import credentials_store
+
+    monkeypatch.setattr(
+        credentials_store,
+        "get_credential",
+        lambda user_id, connector_id: {"account_identifier": "owner@example.com"} if connector_id == "gmail" else None,
+    )
+    available_tools = {"gmail_list_messages", "gmail_brief_messages", "gmail_send_email", "gmail_create_draft"}
+    monkeypatch.setattr(tool_registry, "has", lambda name: name in available_tools)
+    compose = AsyncMock(return_value=("Subject", "Body"))
+    monkeypatch.setattr(planner, "_compose_smart_email", compose)
+
+    read_plan = await planner._build_active_connector_priority_plan("check my latest emails")
+    assert len(read_plan) == 1
+    assert read_plan[0]["tool"] == "gmail_list_messages"
+    assert read_plan[0]["args"] == {"query": "in:inbox", "max_results": 10}
+    assert read_plan[0]["risk_level"] == "READ_ONLY"
+    compose.assert_not_awaited()
+
+    brief_plan = await planner._build_active_connector_priority_plan("make a brief of all emails I have received")
+    assert brief_plan[0]["tool"] == "gmail_brief_messages"
+    assert brief_plan[0]["args"] == {"query": "-from:me", "max_results": 50}
+    assert brief_plan[0]["risk_level"] == "READ_ONLY"
+
+    send_plan = await planner._build_active_connector_priority_plan("send an email to friend@example.com saying hello")
+    assert send_plan[0]["tool"] == "gmail_send_email"
+    assert send_plan[0]["risk_level"] == "PRIVILEGED"
 
 
 def test_filesystem_outcome_validator():

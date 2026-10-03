@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, shell, Notification } from 'electron';
 
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,6 +21,8 @@ const PILL_COLLAPSED_HEIGHT = 68;
 const PILL_TOP_Y = 20;
 let lastSyncedTaskState: any = null;
 let lastSyncedTeachState: any = null;
+let pendingScheduledTaskResponse: { taskId: string; runId: string } | null = null;
+let mainRendererReady = false;
 
 // ---------------------------------------------------------------------------
 // Hotkeys that ACTUALLY work on Windows reliably (not intercepted by the OS):
@@ -94,23 +96,33 @@ function createSpotlightWindow() {
     }
   });
 
+  mainWindow.webContents.on('did-start-loading', () => {
+    mainRendererReady = false;
+  });
+
   // Hide on blur (click outside) ONLY for Spotlight window when no task is running
   mainWindow.on('blur', () => {
-    if (mainWindow && !mainWindow.webContents.isDevToolsOpened()) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDevToolsOpened()) {
       if (!isTaskRunning) {
         mainWindow.hide();
-        mainWindow.webContents.send('window-blurred');
-        mainWindow.webContents.send('window-hidden');
+        if (!mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('window-blurred');
+          mainWindow.webContents.send('window-hidden');
+        }
       }
     }
   });
 
   mainWindow.on('hide', () => {
-    mainWindow?.webContents.send('window-hidden');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window-hidden');
+    }
   });
 
   mainWindow.on('show', () => {
-    mainWindow?.webContents.send('window-shown');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window-shown');
+    }
   });
 
   mainWindow.once('ready-to-show', () => {
@@ -274,6 +286,48 @@ function startLoopbackServer() {
         return;
       }
 
+      if (urlPath === '/scheduled-task-response' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+          if (body.length > 16_384) req.destroy();
+        });
+        req.on('end', () => {
+          try {
+            const payload = JSON.parse(body);
+            const action = payload?.action;
+            if (!Notification.isSupported() || action?.type !== 'scheduled_task_response' || !action.task_id || !action.run_id) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Unsupported notification action' }));
+              return;
+            }
+
+            const notification = new Notification({
+              title: String(payload.title || 'Your email brief is ready').slice(0, 120),
+              body: String(payload.message || 'Click to review your email brief.').slice(0, 500),
+            });
+            notification.on('click', () => {
+              pendingScheduledTaskResponse = {
+                taskId: String(action.task_id),
+                runId: String(action.run_id),
+              };
+              showWindow();
+              if (mainRendererReady && mainWindow && !mainWindow.webContents.isLoading()) {
+                mainWindow.webContents.send('open-scheduled-task-response', pendingScheduledTaskResponse);
+                pendingScheduledTaskResponse = null;
+              }
+            });
+            notification.show();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Invalid notification payload' }));
+          }
+        });
+        return;
+      }
+
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Not found' }));
     });
@@ -360,9 +414,11 @@ function showWindow() {
 }
 
 function hideWindow() {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.hide();
-  mainWindow.webContents.send('window-hidden');
+  if (!mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('window-hidden');
+  }
 }
 
 function toggleWindow() {
@@ -885,10 +941,14 @@ if (!gotTheLock) {
     }, 30_000);
 
     // IPC Handlers
-    ipcMain.on('window-hide', () => hideWindow());
-    ipcMain.on('window-show', () => showWindow());
+    ipcMain.on('window-hide', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) hideWindow();
+    });
+    ipcMain.on('window-show', () => {
+      if (!mainWindow || !mainWindow.isDestroyed()) showWindow();
+    });
     ipcMain.on('spotlight-wake', () => {
-      showWindow();
+      if (!mainWindow || !mainWindow.isDestroyed()) showWindow();
     });
 
     ipcMain.on('window-resize', (_event, { width, height, position }: { width?: number; height: number; position?: string }) => {
@@ -945,6 +1005,15 @@ if (!gotTheLock) {
           pillWindow.moveTop();
           pillWindow.focus();
         }
+      }
+    });
+
+    ipcMain.on('scheduled-task-response-ready', (event) => {
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
+      mainRendererReady = true;
+      if (pendingScheduledTaskResponse && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('open-scheduled-task-response', pendingScheduledTaskResponse);
+        pendingScheduledTaskResponse = null;
       }
     });
 

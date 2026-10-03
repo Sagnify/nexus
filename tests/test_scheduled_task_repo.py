@@ -3,11 +3,14 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 import unittest
 import uuid
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from backend.database.session import Base
 from backend.database.models import User, ScheduledTask, ScheduledTaskRun
 from backend.database.repositories.scheduled_task_repo import ScheduledTaskRepository
+from backend.api import scheduled_tasks as scheduled_tasks_api
 
 
 class TestScheduledTaskRepository(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +49,7 @@ class TestScheduledTaskRepository(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(task.id)
             self.assertEqual(task.name, "Morning Check")
             self.assertTrue(task.enabled)
+            self.assertTrue(task.device_id)
 
             # List user 1 tasks
             user1_tasks = await repo.list_user_tasks(self.user1_id)
@@ -55,6 +59,83 @@ class TestScheduledTaskRepository(unittest.IsolatedAsyncioTestCase):
             # User 2 isolation: user 2 should see 0 tasks
             user2_tasks = await repo.list_user_tasks(self.user2_id)
             self.assertEqual(len(user2_tasks), 0)
+
+    async def test_due_tasks_and_task_lookup_are_device_scoped(self):
+        now = datetime.now(timezone.utc)
+        async with self.session_factory() as session:
+            repo = ScheduledTaskRepository(session)
+            local_task = await repo.create_scheduled_task(
+                user_id=self.user1_id,
+                name="Local schedule",
+                prompt="Check inbox",
+                device_id="device-local",
+                next_run_at=now - timedelta(minutes=1),
+            )
+            remote_task = await repo.create_scheduled_task(
+                user_id=self.user1_id,
+                name="Remote schedule",
+                prompt="Check inbox elsewhere",
+                device_id="device-remote",
+                next_run_at=now - timedelta(minutes=1),
+            )
+            unbound_task = await repo.create_scheduled_task(
+                user_id=self.user1_id,
+                name="Legacy unbound schedule",
+                prompt="Do not run on an arbitrary PC",
+                device_id="unbound",
+                next_run_at=now - timedelta(minutes=1),
+            )
+            await session.commit()
+
+            due_here = await repo.get_due_tasks(now, device_id="device-local")
+            self.assertEqual([task.id for task in due_here], [local_task.id])
+            self.assertIsNone(await repo.get_by_id(remote_task.id, device_id="device-local"))
+            self.assertNotIn(unbound_task.id, [task.id for task in due_here])
+
+    async def test_owner_can_move_unbound_schedule_to_this_device(self):
+        task = SimpleNamespace(
+            id=uuid.uuid4(),
+            user_id=self.user1_id,
+            device_id="unbound",
+            enabled=False,
+            schedule_type="recurring",
+            schedule_definition={"frequency": "interval", "interval_minutes": 60},
+            timezone="UTC",
+            metadata_json={"device_binding_required": True},
+            to_dict=lambda: {
+                "id": str(task.id),
+                "device_id": task.device_id,
+                "enabled": task.enabled,
+                "metadata": task.metadata_json,
+            },
+        )
+
+        class FakeRepository:
+            async def get_by_id(self, task_id, user_id=None):
+                return task if task_id == task.id and user_id == self_user_id else None
+
+            async def update_scheduled_task(self, task_id, user_id, **kwargs):
+                for key, value in kwargs.items():
+                    setattr(task, key, value)
+                return task
+
+        self_user_id = self.user1_id
+        session = SimpleNamespace(commit=AsyncMock())
+        repository = FakeRepository()
+
+        with patch.object(scheduled_tasks_api, "ScheduledTaskRepository", return_value=repository):
+            with patch.object(scheduled_tasks_api, "get_device_id", return_value="device-current"):
+                with patch.object(scheduled_tasks_api, "calculate_next_run", return_value=datetime.now(timezone.utc)):
+                    result = await scheduled_tasks_api.move_scheduled_task_to_this_device(
+                        task.id,
+                        SimpleNamespace(id=self.user1_id),
+                        session,
+                    )
+
+        self.assertEqual(result["device_id"], "device-current")
+        self.assertTrue(result["enabled"])
+        self.assertNotIn("device_binding_required", result["metadata"])
+        session.commit.assert_awaited_once()
 
     async def test_user_cannot_access_or_delete_other_user_task(self):
         async with self.session_factory() as session:

@@ -10,6 +10,7 @@ import logging
 import sys
 import subprocess
 from typing import Optional
+import httpx
 
 logger = logging.getLogger("nexus.notifications")
 
@@ -50,32 +51,55 @@ async def send_user_notification(
     notification_type: str = "reminder",
     task_id: Optional[str] = None,
     speak: bool = False,
+    action: Optional[dict] = None,
 ) -> None:
     """
     Broadcasts a notification to the desktop, active web clients, and optionally speaks it.
     """
     logger.info("[Notification] %s: %s (%s)", title, message, notification_type)
 
-    # 1. Native Windows Toast
+    # 1. Prefer Electron's actionable notification when a notification action exists.
+    delivered_by_electron = False
+    if action:
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                response = await client.post(
+                    "http://127.0.0.1:8765/scheduled-task-response",
+                    json={"title": title, "message": message, "action": action},
+                )
+                delivered_by_electron = response.status_code == 200
+                if not delivered_by_electron:
+                    logger.warning(
+                        "Electron rejected actionable notification (%s): %s",
+                        response.status_code,
+                        response.text[:300],
+                    )
+        except Exception as exc:
+            logger.warning("Electron notification bridge unavailable; scheduled-task alert will not be clickable: %s", exc)
+
+    # 2. Native Windows Toast fallback. It is informational; Electron handles click actions.
     try:
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, show_windows_toast, title, message)
+        if not delivered_by_electron:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, show_windows_toast, title, message)
     except Exception as exc:
         logger.debug("Desktop toast delivery error: %s", exc)
 
-    # 2. In-app SSE stream broadcast
-    try:
-        from backend.api.nexus import push_event
-        await push_event(
-            task_id,
-            "scheduled_notification",
-            {
-                "title": title,
-                "message": message,
-                "type": notification_type,
-                "timestamp": asyncio.get_event_loop().time(),
-            },
-        )
-    except Exception as exc:
-        logger.debug("SSE notification broadcast error: %s", exc)
+    # Actionable scheduled notices travel over the local Electron bridge, not an
+    # arbitrary active task's SSE queue.
+    if not action:
+        try:
+            from backend.api.nexus import push_event
+            await push_event(
+                task_id,
+                "scheduled_notification",
+                {
+                    "title": title,
+                    "message": message,
+                    "type": notification_type,
+                    "timestamp": asyncio.get_event_loop().time(),
+                },
+            )
+        except Exception as exc:
+            logger.debug("SSE notification broadcast error: %s", exc)
 

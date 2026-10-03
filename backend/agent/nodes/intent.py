@@ -1,10 +1,16 @@
 """Intent classification node for NEXUS."""
 from __future__ import annotations
 import json
+import logging
+import uuid
 from langchain_core.messages import SystemMessage, HumanMessage
 from backend.agent.state import NexusState
 from backend.agent.router.model_router import ainvoke_with_dynamic_switch
+from backend.agent.router.artifact_intents import is_artifact_creation_request
+from backend.agent.router.email_intents import classify_email_request
 from backend.core.config import get_groq_api_key, get_gemma_api_key
+
+logger = logging.getLogger("nexus.intent")
 
 INTENT_PROMPT = """You are the NEXUS Intent Classifier.
 Classify the user input into ONE of these intent categories:
@@ -30,7 +36,50 @@ async def intent_node(state: NexusState) -> dict:
     target_app = str(active_target.get("application") or "").lower()
     lower_input = user_input.lower()
 
-    # 0. Check Deterministic Fast-Path Router (Zero LLM Calls, <1ms)
+    if is_artifact_creation_request(user_input):
+        return {
+            "intent": "file_op",
+            "goal": user_input,
+            "execution_status": "thinking",
+            "selected_model": "artifact-creation-fastpath",
+        }
+
+    # 0. Check Learned Skills in Postgres (Highest Priority, Zero LLM Calls)
+    try:
+        from backend.database.session import get_session_factory
+        session_factory = get_session_factory()
+        if session_factory:
+            user_id_val = state.get("user_id")
+            uid = None
+            if user_id_val:
+                try:
+                    uid = uuid.UUID(str(user_id_val)) if isinstance(user_id_val, str) else user_id_val
+                except Exception:
+                    uid = None
+            if not uid:
+                from backend.core.firebase_auth import LOCAL_USER_ID
+                uid = LOCAL_USER_ID
+
+            async with session_factory() as db_session:
+                from backend.agent.skills.matcher import matcher
+                bypass_learned_skill = classify_email_request(user_input) in ("read", "clarify")
+                matched = None if bypass_learned_skill else await matcher.match_skill(user_input, uid, db_session)
+                if matched:
+                    logger.info("[Intent] Learned skill hit for '%s': '%s'", user_input, matched.skill.name)
+                    env = (matched.skill.environment or "browser").lower()
+                    intent_type = "web_automation" if env in ("browser", "web") else "general"
+                    return {
+                        "intent": intent_type,
+                        "goal": user_input,
+                        "skill_id": str(matched.skill.id),
+                        "skill_matched": True,
+                        "execution_status": "planning",
+                        "selected_model": "skill-dispatcher",
+                    }
+    except Exception as e:
+        logger.debug("[Intent] Skill pre-check bypassed: %s", e)
+
+    # 0.1 Check Deterministic Fast-Path Router (Zero LLM Calls, <1ms)
     try:
         from backend.agent.router.fastpath_router import match_fastpath_plan
         fast_res = match_fastpath_plan(user_input, active_target=active_target)

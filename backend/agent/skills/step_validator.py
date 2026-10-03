@@ -142,22 +142,23 @@ class StepValidator:
                 corrected_order = ai_result.corrected_order
                 optimizations = list(ai_result.optimizations_applied or [])
 
-                if (
-                    auto_fix
-                    and isinstance(corrected_order, list)
-                    and len(corrected_order) == len(steps)
-                    and sorted(corrected_order) == list(range(len(steps)))
-                ):
-                    corrected = [steps[index] for index in corrected_order]
-                    if corrected != steps and not any("reorder" in str(opt).lower() for opt in optimizations):
-                        optimizations.append(f"AI reordered {len(steps)} steps into logical causal sequence")
-                elif auto_fix:
-                    corrected = self._heuristic_auto_fix(steps)
-                    if corrected:
-                        optimizations.append("Auto-repaired step order (normalized route to step 0)")
+                if auto_fix:
+                    if (
+                        isinstance(corrected_order, list)
+                        and len(corrected_order) == len(steps)
+                        and sorted(corrected_order) == list(range(len(steps)))
+                    ):
+                        reordered_by_ai = [steps[index] for index in corrected_order]
+                        if reordered_by_ai != steps and not any("reorder" in str(opt).lower() for opt in optimizations):
+                            optimizations.append(f"AI reordered {len(steps)} steps into logical causal sequence")
+                        corrected = self._heuristic_auto_fix(reordered_by_ai) or reordered_by_ai
+                    else:
+                        corrected = self._heuristic_auto_fix(steps)
+                        if corrected:
+                            optimizations.append("Auto-repaired step order (normalized route to step 0)")
 
-                if not corrected and auto_fix:
-                    corrected = self._heuristic_auto_fix(steps)
+                    if not corrected:
+                        corrected = self._heuristic_auto_fix(steps)
 
                 final_steps = corrected or steps
 

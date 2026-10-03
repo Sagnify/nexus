@@ -19,6 +19,7 @@ from backend.database.session import get_db_session
 from backend.database.repositories.scheduled_task_repo import ScheduledTaskRepository
 from backend.services.schedule_parser import schedule_parser, calculate_next_run
 from backend.services.scheduler_service import scheduler_service
+from backend.core.device_identity import get_device_id
 
 logger = logging.getLogger("nexus.api.scheduled_tasks")
 router = APIRouter()
@@ -165,6 +166,12 @@ async def create_from_natural_language(
     }
 
 
+@router.get("/device-id")
+async def get_local_device_id(user: User = Depends(get_current_user)):
+    """Return this installation's opaque ID for labeling/assigning user schedules."""
+    return {"device_id": get_device_id()}
+
+
 @router.get("/{task_id}")
 async def get_scheduled_task(
     task_id: uuid.UUID,
@@ -247,12 +254,45 @@ async def resume_scheduled_task(
     task = await repo.get_by_id(task_id, user_id=user.id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled task not found.")
+    if task.device_id != get_device_id():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This schedule belongs to another device. Move it to this device before resuming.",
+        )
 
     next_run = calculate_next_run(task.schedule_type, task.schedule_definition, task.timezone)
     task.enabled = True
     task.next_run_at = next_run
     await session.commit()
     return task.to_dict()
+
+
+@router.post("/{task_id}/move-to-this-device")
+async def move_scheduled_task_to_this_device(
+    task_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Explicitly transfer a user's schedule to the device making this request."""
+    repo = ScheduledTaskRepository(session)
+    task = await repo.get_by_id(task_id, user_id=user.id)
+    if not task:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled task not found.")
+
+    device_id = get_device_id()
+    next_run = calculate_next_run(task.schedule_type, task.schedule_definition, task.timezone)
+    metadata = dict(task.metadata_json or {})
+    metadata.pop("device_binding_required", None)
+    updated = await repo.update_scheduled_task(
+        task_id,
+        user_id=user.id,
+        device_id=device_id,
+        enabled=True,
+        next_run_at=next_run,
+        metadata_json=metadata,
+    )
+    await session.commit()
+    return updated.to_dict()
 
 
 @router.post("/{task_id}/run-now")
@@ -266,6 +306,11 @@ async def run_scheduled_task_now(
     task = await repo.get_by_id(task_id, user_id=user.id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled task not found.")
+    if task.device_id != get_device_id():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This schedule belongs to another device. Move it here before running it.",
+        )
 
     run = await scheduler_service.trigger_run_now(task.id, user.id)
     if not run:

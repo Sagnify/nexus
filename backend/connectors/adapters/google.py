@@ -5,10 +5,13 @@ automatic token refresh, and strict scope containment.
 """
 from __future__ import annotations
 import base64
+import asyncio
 import email.message
+import html as html_lib
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, quote
@@ -230,6 +233,40 @@ class GoogleAPIAdapter(BaseConnectorAdapter):
         if self.connector_id == "gmail":
             tools.append(
                 ConnectorToolMetadata(
+                    tool_id="gmail.list_messages",
+                    connector_id="gmail",
+                    name="gmail_list_messages",
+                    description="Read recent inbox emails, returning sender, subject, date, and snippet. This tool never sends or modifies messages.",
+                    risk_level="safe",
+                    source="api",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Gmail search query; defaults to in:inbox"},
+                            "max_results": {"type": "integer", "description": "Maximum messages to return (1-25)", "default": 10},
+                        },
+                    },
+                )
+            )
+            tools.append(
+                ConnectorToolMetadata(
+                    tool_id="gmail.brief_messages",
+                    connector_id="gmail",
+                    name="gmail_brief_messages",
+                    description="Create a compact, read-only inbox brief using sender, subject, date, snippet, and message ID. Never reads or includes full message bodies.",
+                    risk_level="safe",
+                    source="api",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Gmail search query; use -from:me for received mail"},
+                            "max_results": {"type": "integer", "description": "Maximum messages to include (1-20)", "default": 12},
+                        },
+                    },
+                )
+            )
+            tools.append(
+                ConnectorToolMetadata(
                     tool_id="gmail.send_email",
                     connector_id="gmail",
                     name="gmail_send_email",
@@ -397,6 +434,16 @@ class GoogleAPIAdapter(BaseConnectorAdapter):
         return ToolResult(success=False, output="", error=f"Unknown tool: {tool_name}")
 
     async def _execute_gmail(self, tool_name: str, args: Dict[str, Any], token: str) -> ToolResult:
+        if tool_name in {"gmail_list_messages", "gmail_brief_messages"}:
+            is_brief = tool_name == "gmail_brief_messages"
+            query = str(args.get("query") or ("-from:me" if is_brief else "in:inbox"))
+            default_count = 12 if is_brief else 10
+            max_results = max(1, min(int(args.get("max_results", default_count)), 20 if is_brief else 50))
+            read_result = await self._read_gmail_messages(query, max_results, token, include_body=False)
+            if not read_result.success or not is_brief:
+                return read_result
+            return self._build_gmail_brief(read_result.metadata or {})
+
         to = args.get("to") or args.get("recipient") or args.get("email")
         subject = args.get("subject") or args.get("title", "")
         body = args.get("body") or args.get("content") or args.get("message", "")
@@ -459,6 +506,203 @@ class GoogleAPIAdapter(BaseConnectorAdapter):
                     )
         except Exception as e:
             return ToolResult(success=False, output="", error=f"Gmail request failed: {e}")
+
+    @staticmethod
+    def _gmail_read_error(response: httpx.Response) -> ToolResult:
+        if response.status_code in (401, 403):
+            message = "Gmail read access is missing or expired. Reconnect Gmail and approve the read-only inbox permission, then retry."
+        else:
+            message = f"Gmail API error ({response.status_code}) while reading inbox: {response.text}"
+        return ToolResult(success=False, output="", error=message)
+
+    async def _read_gmail_messages(
+        self,
+        query: str,
+        max_results: int,
+        token: str,
+        include_body: bool,
+    ) -> ToolResult:
+        base_url = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
+        headers = {"Authorization": f"Bearer {token}"}
+        message_refs = []
+        total_estimate = 0
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                page_token = None
+                while len(message_refs) < max_results:
+                    params = {"q": query, "maxResults": min(100, max_results - len(message_refs))}
+                    if page_token:
+                        params["pageToken"] = page_token
+                    listing = await client.get(base_url, headers=headers, params=params)
+                    if listing.status_code != 200:
+                        return self._gmail_read_error(listing)
+                    listing_data = listing.json()
+                    total_estimate = listing_data.get("resultSizeEstimate", total_estimate)
+                    message_refs.extend(listing_data.get("messages", []) or [])
+                    page_token = listing_data.get("nextPageToken")
+                    if not page_token or not listing_data.get("messages"):
+                        break
+
+                messages = []
+                for ref in message_refs[:max_results]:
+                    params = [("format", "full" if include_body else "metadata")]
+                    if not include_body:
+                        params.extend(("metadataHeaders", name) for name in ("From", "Subject", "Date"))
+                    response = await client.get(
+                        f"{base_url}/{ref['id']}",
+                        headers=headers,
+                        params=params,
+                    )
+                    if response.status_code != 200:
+                        return self._gmail_read_error(response)
+                    data = response.json()
+                    message_headers = {
+                        item.get("name", "").lower(): item.get("value", "")
+                        for item in data.get("payload", {}).get("headers", [])
+                    }
+                    message = {
+                        "id": data.get("id"),
+                        "from": message_headers.get("from", ""),
+                        "subject": message_headers.get("subject", "(no subject)"),
+                        "date": message_headers.get("date", ""),
+                        "snippet": data.get("snippet", ""),
+                    }
+                    if include_body:
+                        body = self._extract_gmail_body(data.get("payload", {})) or message["snippet"]
+                        message["body"] = body[:2500]
+                    messages.append(message)
+
+            truncated = total_estimate > len(messages)
+            output = json.dumps({"messages": messages, "count": len(messages)}, indent=2)
+            return ToolResult(
+                success=True,
+                output=output,
+                metadata={
+                    "messages": messages,
+                    "count": len(messages),
+                    "total_estimate": total_estimate,
+                    "truncated": truncated,
+                },
+            )
+        except Exception as e:
+            return ToolResult(success=False, output="", error=f"Failed to read Gmail messages: {e}")
+
+    @staticmethod
+    def _extract_gmail_body(payload: dict) -> str:
+        plain_text = []
+        html_text = []
+
+        def visit(part: dict) -> None:
+            mime_type = part.get("mimeType", "").lower()
+            data = part.get("body", {}).get("data")
+            if data:
+                decoded = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", errors="replace")
+                if mime_type == "text/plain":
+                    plain_text.append(decoded)
+                elif mime_type == "text/html":
+                    html_text.append(decoded)
+            for child in part.get("parts", []) or []:
+                visit(child)
+
+        visit(payload)
+        if plain_text:
+            return "\n".join(plain_text).strip()
+        if html_text:
+            cleaned = re.sub(r"<[^>]+>", " ", "\n".join(html_text))
+            return html_lib.unescape(re.sub(r"\s+", " ", cleaned)).strip()
+        return ""
+
+    @staticmethod
+    def _format_gmail_messages(messages: list[dict], total_estimate: int, truncated: bool) -> str:
+        if not messages:
+            return "No received Gmail messages matched this search."
+        sections = [
+            f"From: {message['from']}\nDate: {message['date']}\nSubject: {message['subject']}\n\n{message['body']}"
+            for message in messages
+        ]
+        notice = f"Read {len(messages)} of approximately {total_estimate} matching emails.\n\n" if truncated else ""
+        return notice + "\n\n---\n\n".join(sections)
+
+    @staticmethod
+    def _escape_markdown(text: str) -> str:
+        return re.sub(r"([\\`*_{}\[\]<>#])", r"\\\1", text)
+
+    @classmethod
+    def _linkify_gmail_snippet(cls, text: str) -> str:
+        """Render only the useful part of Gmail's small preview as safe Markdown."""
+        cleaned = cls._clean_gmail_preview(text)
+        if not cleaned:
+            return "No preview available."
+
+        parts = re.split(r"(https?://[^\s<>]+)", cleaned)
+        rendered = []
+        for part in parts:
+            if re.fullmatch(r"https?://[^\s<>]+", part or ""):
+                url = part.rstrip(".,;:!?")
+                trailing = part[len(url):]
+                rendered.append(f"[Open link]({url}){cls._escape_markdown(trailing)}")
+            else:
+                rendered.append(cls._escape_markdown(part))
+        return "".join(rendered)
+
+    @staticmethod
+    def _clean_gmail_preview(text: str) -> str:
+        """Remove common email chrome without ever reading or sending full bodies.
+
+        Gmail's ``snippet`` is intentionally short.  Newsletter snippets can still
+        end in mirror-page, preference, unsubscribe, or tracking-link boilerplate;
+        dropping that tail keeps a per-message brief useful and bounded.
+        """
+        preview = html_lib.unescape(text or "")
+        preview = re.sub(r"\s+", " ", preview).strip()
+        preview = re.sub(r"(?i)\[?(?:image|logo|button):[^\]]*\]?", "", preview)
+        boilerplate = re.search(
+            r"(?i)\b(?:having trouble viewing (?:this )?(?:email|message)|"
+            r"view (?:this )?(?:email|message) (?:in (?:your )?browser|online)|"
+            r"unsubscribe|manage (?:your )?(?:email )?preferences|privacy policy)\b",
+            preview,
+        )
+        if boilerplate:
+            preview = preview[:boilerplate.start()].rstrip(" -|:")
+        # A preview is presentation data, not LLM input.  This hard cap keeps every
+        # email separate while making large scheduled briefs predictable in size.
+        return preview[:320].rstrip()
+
+    @classmethod
+    def _build_gmail_brief(cls, data: dict) -> ToolResult:
+        messages = data.get("messages", [])
+        if not messages:
+            return ToolResult(success=True, output="## New email brief\n\nNo received Gmail messages matched this search.", metadata=data)
+
+        total = data.get("total_estimate", len(messages))
+        shown = len(messages)
+        heading = f"## New email brief\n\n**{shown} message{'s' if shown != 1 else ''} shown**"
+        if total > shown:
+            heading += f" of approximately {total} matching emails"
+        heading += "."
+
+        entries = []
+        for index, message in enumerate(messages, start=1):
+            message_id = str(message.get("id") or "unknown")
+            message_url = f"https://mail.google.com/mail/u/0/#all/{quote(message_id, safe='')}"
+            subject = cls._escape_markdown(str(message.get("subject") or "(no subject)"))
+            sender = cls._escape_markdown(str(message.get("from") or "Unknown sender"))
+            date = cls._escape_markdown(str(message.get("date") or "Unknown date"))
+            snippet = cls._linkify_gmail_snippet(str(message.get("snippet") or ""))
+            entries.append(
+                f"### {index}. {subject}\n\n"
+                f"**From:** {sender}  \\n"
+                f"**When:** {date}  \\n"
+                f"[Open in Gmail]({message_url}) | ID: `{message_id}`\n\n"
+                f"{snippet}"
+            )
+
+        return ToolResult(success=True, output=f"{heading}\n\n" + "\n\n".join(entries), metadata={
+            "count": data.get("count", shown),
+            "total_estimate": total,
+            "truncated": data.get("truncated", False),
+            "messages": messages,
+        })
 
     async def _execute_calendar(self, tool_name: str, args: Dict[str, Any], token: str) -> ToolResult:
         headers = {

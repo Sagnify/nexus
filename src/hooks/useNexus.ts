@@ -115,7 +115,26 @@ const isDateTimeQuery = (input: string): boolean => {
   const runTask = async (input: string) => {
     if (!input.trim()) return;
 
+    const previousTaskId = taskState.taskId;
+    const previousTaskIsActive = Boolean(
+      taskState.isRunning ||
+      taskState.isPaused ||
+      taskState.pendingPermission ||
+      taskState.userInputRequest
+    );
     cleanupStream();
+
+    if (previousTaskId && previousTaskIsActive) {
+      try {
+        await fetch(`${BACKEND_URL}/api/nexus/cancel/${previousTaskId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+      } catch (err) {
+        console.warn('Could not cancel previous task before starting a new one:', err);
+      }
+    }
 
     // Instant local handling for time & date queries (0ms, no cloud LLM lag or thinking state)
     if (isDateTimeQuery(input)) {

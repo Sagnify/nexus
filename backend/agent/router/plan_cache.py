@@ -196,13 +196,15 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
     lower = clean.lower()
 
     # Substantive markers that require LLM planner / deep research / live data generation
+    # Unless explicitly requested as a template/boilerplate/skeleton
+    is_template = any(w in lower for w in ("template", "boilerplate", "sample", "blank", "skeleton"))
     substantive_markers = (
         "deep research", "web scrape", "live search", "investigate",
         "industrialization", "citations", "top 10", "top 5", "top ",
         "best ", "chess players", "champions league", "scorers", "crypto",
         "formula", "chart", "graph", "compare", "comparison"
     )
-    if any(m in lower for m in substantive_markers):
+    if not is_template and any(m in lower for m in substantive_markers):
         return None, {}
 
     # Match Word Document requests (e.g. "make a word file about agentic ai", "create a word report on AI Agents")
@@ -225,8 +227,11 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
         lower,
     )
     if excel_match and any(w in lower for w in ("excel", "spreadsheet", "xlsx", "sheet")):
+        # Only use canonical template if the request is generic/template
+        topic = (excel_match.group(1) or "data").strip()
         custom_path = excel_match.group(2)
-        path = custom_path or "Desktop/data_template.xlsx"
+        safe_topic_slug = re.sub(r"[^\w\s-]", "", topic).strip().replace(" ", "_")[:30] or "data"
+        path = custom_path or f"Desktop/{safe_topic_slug}_template.xlsx"
         if not path.endswith(".xlsx"):
             path += ".xlsx"
         return "create_excel_sheet", {"path": path}

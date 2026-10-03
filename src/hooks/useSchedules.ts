@@ -13,6 +13,7 @@ export interface ScheduleDefinition {
 export interface ScheduledTaskData {
   id: string;
   user_id: string;
+  device_id: string;
   name: string;
   description: string | null;
   task_type: 'reminder' | 'automation';
@@ -91,6 +92,7 @@ export interface CreateScheduledTaskPayload {
 
 export const useSchedules = () => {
   const [tasks, setTasks] = useState<ScheduledTaskData[]>([]);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const { user, idToken, isGuest } = useAuth();
@@ -124,6 +126,11 @@ export const useSchedules = () => {
       }
       const data: ScheduledTaskData[] = await res.json();
       setTasks(data);
+      const deviceRes = await fetch('http://localhost:8000/api/scheduled-tasks/device-id', { headers });
+      if (deviceRes.ok) {
+        const deviceData: { device_id: string } = await deviceRes.json();
+        setDeviceId(deviceData.device_id);
+      }
     } catch (err: any) {
       setError(err?.message || 'Error fetching scheduled tasks');
     } finally {
@@ -210,6 +217,21 @@ export const useSchedules = () => {
     return await res.json();
   }, [getHeaders]);
 
+  const moveToThisDevice = useCallback(async (taskId: string) => {
+    const headers = await getHeaders();
+    const res = await fetch(`http://localhost:8000/api/scheduled-tasks/${taskId}/move-to-this-device`, {
+      method: 'POST',
+      headers,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to move schedule to this device');
+    }
+    const updated: ScheduledTaskData = await res.json();
+    setTasks((prev) => prev.map((task) => (task.id === taskId ? updated : task)));
+    return updated;
+  }, [getHeaders]);
+
   const deleteTask = useCallback(async (taskId: string) => {
     const headers = await getHeaders();
     const res = await fetch(`http://localhost:8000/api/scheduled-tasks/${taskId}`, {
@@ -233,8 +255,18 @@ export const useSchedules = () => {
     return await res.json();
   }, [getHeaders]);
 
+  const fetchTask = useCallback(async (taskId: string): Promise<ScheduledTaskData> => {
+    const headers = await getHeaders();
+    const res = await fetch(`http://localhost:8000/api/scheduled-tasks/${taskId}`, { headers });
+    if (!res.ok) {
+      throw new Error('Failed to load scheduled task');
+    }
+    return await res.json();
+  }, [getHeaders]);
+
   return {
     tasks,
+    deviceId,
     loading,
     error,
     fetchTasks,
@@ -243,7 +275,9 @@ export const useSchedules = () => {
     createFromText,
     togglePause,
     runNow,
+    moveToThisDevice,
     deleteTask,
     fetchRuns,
+    fetchTask,
   };
 };

@@ -375,6 +375,7 @@ class ScheduledTask(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(String(64), nullable=False)
 
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
@@ -415,13 +416,14 @@ class ScheduledTask(Base):
 
     __table_args__ = (
         Index("ix_scheduled_tasks_user_enabled_next", "user_id", "enabled", "next_run_at"),
-        Index("ix_scheduled_tasks_due", "enabled", "next_run_at"),
+        Index("ix_scheduled_tasks_due", "device_id", "enabled", "next_run_at"),
     )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
+            "device_id": self.device_id,
             "name": self.name,
             "description": self.description,
             "task_type": self.task_type,

@@ -145,19 +145,51 @@ async def verify_id_token(token: str) -> dict[str, Any]:
 
 import uuid
 import time
+from backend.core.device_identity import get_device_id
 
-LOCAL_USER_UID = "local_default_user"
-LOCAL_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+def get_device_local_user_info() -> tuple[uuid.UUID, str, str, str]:
+    """Derive isolated, stable device user identity for this specific hardware installation."""
+    dev_id = get_device_id()
+    short_id = dev_id[:8]
+    user_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"nexus-local-device-{dev_id}")
+    user_uid = f"local_device_{dev_id}"
+    email = f"local@{short_id}.nexus.desktop"
+    display_name = f"Local Device ({short_id})"
+    return user_id, user_uid, email, display_name
+
+def get_device_local_user_id() -> uuid.UUID:
+    """Return the isolated deterministic UUID for this local device."""
+    return get_device_local_user_info()[0]
+
+LEGACY_LOCAL_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+LEGACY_LOCAL_USER_UID = "local_default_user"
+
+# Active per-device local identity
+LOCAL_DEVICE_USER_ID, LOCAL_DEVICE_USER_UID, _DEV_EMAIL, _DEV_NAME = get_device_local_user_info()
+LOCAL_USER_ID = LOCAL_DEVICE_USER_ID
+LOCAL_USER_UID = LOCAL_DEVICE_USER_UID
 
 _fallback_local_user = User(
-    id=LOCAL_USER_ID,
-    firebase_uid=LOCAL_USER_UID,
-    email="local@nexus.desktop",
-    display_name="Local User",
+    id=LOCAL_DEVICE_USER_ID,
+    firebase_uid=LOCAL_DEVICE_USER_UID,
+    email=_DEV_EMAIL,
+    display_name=_DEV_NAME,
 )
 _cached_local_user: Optional[User] = None
 _user_token_cache: dict[str, tuple[float, User]] = {}
 _auth_lock = asyncio.Lock()
+
+
+def _migrate_connector_credentials(user: User) -> None:
+    firebase_uid = str(getattr(user, "firebase_uid", "") or "")
+    database_user_id = str(getattr(user, "id", "") or "")
+    if not firebase_uid or not database_user_id or firebase_uid == database_user_id:
+        return
+    try:
+        from backend.connectors.credentials_store import credentials_store
+        credentials_store.migrate_user_credentials(firebase_uid, database_user_id)
+    except Exception as exc:
+        logger.warning("[Auth] Could not migrate connector credentials for user %s: %s", database_user_id, exc)
 
 
 async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, Any]) -> User:
@@ -172,6 +204,7 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
             claims_name = claims.get("name")
             claims_email = claims.get("email")
             if (not claims_name or cached_user.display_name == claims_name) and (not claims_email or cached_user.email == claims_email):
+                _migrate_connector_credentials(cached_user)
                 return cached_user
 
     deterministic_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"nexus-user-{uid}")
@@ -185,6 +218,7 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
 
     if session is None:
         _user_token_cache[uid] = (now, fallback_user)
+        _migrate_connector_credentials(fallback_user)
         return fallback_user
 
     # Serialize concurrent resolution on startup/cold-boot to avoid duplicate DB queries
@@ -230,6 +264,7 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
                     await asyncio.wait_for(session.flush(), timeout=8.0)
 
             _user_token_cache[uid] = (now, user)
+            _migrate_connector_credentials(user)
             return user
         except Exception as exc:
             err_msg = str(exc) or repr(exc) or type(exc).__name__
@@ -241,17 +276,61 @@ async def get_or_create_user(session: Optional[AsyncSession], claims: dict[str, 
             else:
                 logger.warning(f"[Auth] Database connection issue resolving user {uid}, using resilient fallback: {err_msg}")
             _user_token_cache[uid] = (now, fallback_user)
+            _migrate_connector_credentials(fallback_user)
             return fallback_user
 
+    _user_token_cache[uid] = (now, fallback_user)
+    _migrate_connector_credentials(fallback_user)
+    return fallback_user
 
 async def get_or_create_local_user(session: Optional[AsyncSession] = None) -> User:
-    """Ensures a persistent local desktop user account exists in DB for offline/local use with graceful fallback."""
+    """Ensures an isolated persistent local desktop user account exists in DB for this device profile."""
     global _cached_local_user
-    if _cached_local_user is not None:
-        return _cached_local_user
+    if _cached_local_user is None:
+        _cached_local_user = _fallback_local_user
+        _migrate_connector_credentials(_cached_local_user)
 
-    # Return immediate memory fallback instantly with ZERO blocking on cold DB connections
-    _cached_local_user = _fallback_local_user
+    if session is not None:
+        try:
+            stmt = select(User).where(User.id == _cached_local_user.id)
+            result = await session.execute(stmt)
+            user = result.scalar_one_or_none()
+            if user is None:
+                stmt_uid = select(User).where(User.firebase_uid == _cached_local_user.firebase_uid)
+                res_uid = await session.execute(stmt_uid)
+                user = res_uid.scalar_one_or_none()
+                if user is None:
+                    user = User(
+                        id=_cached_local_user.id,
+                        firebase_uid=_cached_local_user.firebase_uid,
+                        email=_cached_local_user.email,
+                        display_name=_cached_local_user.display_name,
+                    )
+                    session.add(user)
+                    await session.flush()
+                    logger.info(f"[Auth] Initialized isolated device local user: {user.id}")
+
+            # Idempotently migrate legacy local user skills to this machine's isolated device user
+            if _cached_local_user.id != LEGACY_LOCAL_USER_ID:
+                try:
+                    from backend.database.models import Skill
+                    from sqlalchemy import update
+                    await session.execute(
+                        update(Skill)
+                        .where(Skill.user_id == LEGACY_LOCAL_USER_ID)
+                        .values(user_id=_cached_local_user.id)
+                    )
+                    await session.flush()
+                except Exception as mig_exc:
+                    logger.debug(f"[Auth] Legacy local skills migration skipped: {mig_exc}")
+
+            _cached_local_user = user
+            _migrate_connector_credentials(_cached_local_user)
+            return _cached_local_user
+        except Exception as exc:
+            logger.debug(f"[Auth] Local user DB initialization skipped (resilient offline fallback active): {exc}")
+
+    _migrate_connector_credentials(_cached_local_user)
     return _cached_local_user
 
 

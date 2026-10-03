@@ -17,22 +17,24 @@ CATALOG: Dict[str, ConnectorDefinition] = {
     "gmail": ConnectorDefinition(
         id="gmail",
         name="Gmail",
-        description="Send and draft emails directly through the official Gmail API.",
+        description="Read inbox messages, send emails, and create drafts through the official Gmail API.",
         category=ConnectorCategory.COMMUNICATION,
         type=ConnectorType.API,
         icon="Mail",
         auth_type=AuthType.GOOGLE_OAUTH,
         required_scopes=[
+            "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.send",
             "https://www.googleapis.com/auth/gmail.compose",
         ],
-        auth_instructions="Authorize NEXUS to access Gmail with scoped send permission.",
+        auth_instructions="Authorize NEXUS to read inbox messages, send emails, and create drafts.",
         capabilities=[
+            "Read inbox messages",
             "Send emails",
             "Draft messages",
             "Template mail composition",
         ],
-        default_tools=["gmail_send_email", "gmail_create_draft"],
+        default_tools=["gmail_list_messages", "gmail_brief_messages", "gmail_send_email", "gmail_create_draft"],
     ),
 
     # ── 2. Google Calendar (Google API) ───────────────────────────────────────

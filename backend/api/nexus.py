@@ -9,6 +9,7 @@ import time
 import json
 import uuid
 import logging
+from contextvars import ContextVar
 from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Depends
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ _task_background_jobs: dict[str, asyncio.Task] = {}
 _task_pause_events: dict[str, asyncio.Event] = {}
 _token_callbacks: dict[str, Any] = {}
 _pending_user_inputs: dict[str, asyncio.Future[str]] = {}
+_current_workflow_task_id: ContextVar[str | None] = ContextVar("nexus_workflow_task_id", default=None)
 
 
 class RunRequest(BaseModel):
@@ -51,8 +53,10 @@ class UserInputSubmission(BaseModel):
 
 async def push_event(task_id: str | None, event_type: str, data: dict):
     if not task_id:
+        task_id = _current_workflow_task_id.get()
+    if not task_id:
         active_ids = [tid for tid, st in _task_states.items() if st.get("execution_status") in ("executing", "running", "paused", "observing")]
-        task_id = active_ids[-1] if active_ids else (list(_task_queues.keys())[-1] if _task_queues else None)
+        task_id = active_ids[0] if len(active_ids) == 1 else None
     if task_id:
         queue = _task_queues.get(task_id)
         if queue:
@@ -60,6 +64,14 @@ async def push_event(task_id: str | None, event_type: str, data: dict):
 
 
 async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bool = False):
+    token = _current_workflow_task_id.set(task_id)
+    try:
+        return await _run_agent_workflow(task_id, initial_state, resume)
+    finally:
+        _current_workflow_task_id.reset(token)
+
+
+async def _run_agent_workflow(task_id: str, initial_state: NexusState, resume: bool = False):
     config = {"configurable": {"thread_id": task_id}}
     max_retries = 3
     retry_count = 0
@@ -84,8 +96,19 @@ async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bo
             if not resume:
                 await push_event(task_id, "status", {"status": "thinking", "message": "Analyzing intent..."})
 
+            input_state = None
+            if not resume:
+                input_state = initial_state
+            else:
+                try:
+                    cp = await nexus_graph.aget_state(config)
+                    if not cp or not cp.values:
+                        input_state = _task_states.get(task_id) or initial_state
+                except Exception:
+                    input_state = _task_states.get(task_id) or initial_state
+
             async for output in nexus_graph.astream(
-                None if resume else initial_state,
+                input_state,
                 config=config,
                 stream_mode="updates"
             ):
@@ -259,6 +282,7 @@ async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bo
             await push_event(task_id, "done", {})
             return
         except Exception as e:
+            logger.exception(f"[Task Execution] Task {task_id} encountered exception: {e}")
             retry_count += 1
             if retry_count > max_retries:
                 try:
@@ -354,7 +378,8 @@ async def run_task(
         user
         and (
             (user.firebase_uid and not user.firebase_uid.startswith("guest_"))
-            or (user.email and user.email.lower().endswith("@nexus.desktop"))
+            or (user.firebase_uid and user.firebase_uid.startswith("local_device_"))
+            or (user.email and (user.email.lower().endswith("@nexus.desktop") or user.email.lower().endswith(".nexus.desktop")))
         )
     )
     user_id = str(user.id) if is_valid_user else None

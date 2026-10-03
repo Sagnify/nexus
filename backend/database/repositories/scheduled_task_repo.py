@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.database.models import ScheduledTask, ScheduledTaskRun
+from backend.core.device_identity import get_device_id
 
 
 class ScheduledTaskRepository:
@@ -36,10 +37,12 @@ class ScheduledTaskRepository:
         execution_config: Optional[dict[str, Any]] = None,
         last_run_status: Optional[str] = None,
         metadata_json: Optional[dict[str, Any]] = None,
+        device_id: Optional[str] = None,
     ) -> ScheduledTask:
         """Create and persist a new scheduled task."""
         task = ScheduledTask(
             user_id=user_id,
+            device_id=device_id or get_device_id(),
             name=name,
             description=description,
             task_type=task_type,
@@ -60,11 +63,18 @@ class ScheduledTaskRepository:
         await self.session.refresh(task)
         return task
 
-    async def get_by_id(self, task_id: uuid.UUID, user_id: Optional[uuid.UUID] = None) -> Optional[ScheduledTask]:
+    async def get_by_id(
+        self,
+        task_id: uuid.UUID,
+        user_id: Optional[uuid.UUID] = None,
+        device_id: Optional[str] = None,
+    ) -> Optional[ScheduledTask]:
         """Fetch scheduled task by ID, optionally enforcing user ownership."""
         stmt = select(ScheduledTask).where(ScheduledTask.id == task_id)
         if user_id is not None:
             stmt = stmt.where(ScheduledTask.user_id == user_id)
+        if device_id is not None:
+            stmt = stmt.where(ScheduledTask.device_id == device_id)
         res = await self.session.execute(stmt)
         return res.scalar_one_or_none()
 
@@ -124,7 +134,7 @@ class ScheduledTaskRepository:
         """Enable or pause a scheduled task."""
         return await self.update_scheduled_task(task_id, user_id, enabled=enabled)
 
-    async def get_due_tasks(self, now: datetime.datetime, limit: int = 25) -> list[ScheduledTask]:
+    async def get_due_tasks(self, now: datetime.datetime, device_id: str, limit: int = 25) -> list[ScheduledTask]:
         """
         Fetch all tasks across users that are enabled and due for execution.
         """
@@ -132,6 +142,7 @@ class ScheduledTaskRepository:
             select(ScheduledTask)
             .where(
                 ScheduledTask.enabled == True,
+                ScheduledTask.device_id == device_id,
                 ScheduledTask.next_run_at != None,
                 ScheduledTask.next_run_at <= now,
             )

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.models import Skill, SkillVersion
 from backend.database.repositories.skill_repo import SkillRepository
 from backend.agent.skills.param_extractor import extractor
+from backend.agent.router.artifact_intents import is_artifact_creation_request
 
 logger = logging.getLogger("nexus.skills.matcher")
 
@@ -296,6 +297,9 @@ class SkillMatcher:
         """
         if not user_prompt or not user_prompt.strip():
             return None
+        if is_artifact_creation_request(user_prompt):
+            logger.info("[SkillMatcher] Skipping learned skills for explicit office-file creation")
+            return None
 
         repo = SkillRepository(session)
         skills = await repo.get_active_skills_for_matching(user_id)
@@ -309,7 +313,11 @@ class SkillMatcher:
             if not skill.versions:
                 continue
 
-            for trigger in skill.trigger_phrases or []:
+            triggers_to_check = list(skill.trigger_phrases or [])
+            if skill.name and skill.name not in triggers_to_check:
+                triggers_to_check.insert(0, skill.name)
+
+            for trigger in triggers_to_check:
                 norm_trig = self._normalize_text(trigger)
                 # Exact normalized trigger
                 if norm_trig == norm_query:
