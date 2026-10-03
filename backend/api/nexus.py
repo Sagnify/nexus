@@ -9,6 +9,7 @@ import time
 import json
 import uuid
 import logging
+from contextvars import ContextVar
 from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Depends
 from pydantic import BaseModel
@@ -31,6 +32,7 @@ _task_background_jobs: dict[str, asyncio.Task] = {}
 _task_pause_events: dict[str, asyncio.Event] = {}
 _token_callbacks: dict[str, Any] = {}
 _pending_user_inputs: dict[str, asyncio.Future[str]] = {}
+_current_workflow_task_id: ContextVar[str | None] = ContextVar("nexus_workflow_task_id", default=None)
 
 
 class RunRequest(BaseModel):
@@ -51,8 +53,10 @@ class UserInputSubmission(BaseModel):
 
 async def push_event(task_id: str | None, event_type: str, data: dict):
     if not task_id:
+        task_id = _current_workflow_task_id.get()
+    if not task_id:
         active_ids = [tid for tid, st in _task_states.items() if st.get("execution_status") in ("executing", "running", "paused", "observing")]
-        task_id = active_ids[-1] if active_ids else (list(_task_queues.keys())[-1] if _task_queues else None)
+        task_id = active_ids[0] if len(active_ids) == 1 else None
     if task_id:
         queue = _task_queues.get(task_id)
         if queue:
@@ -60,6 +64,14 @@ async def push_event(task_id: str | None, event_type: str, data: dict):
 
 
 async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bool = False):
+    token = _current_workflow_task_id.set(task_id)
+    try:
+        return await _run_agent_workflow(task_id, initial_state, resume)
+    finally:
+        _current_workflow_task_id.reset(token)
+
+
+async def _run_agent_workflow(task_id: str, initial_state: NexusState, resume: bool = False):
     config = {"configurable": {"thread_id": task_id}}
     max_retries = 3
     retry_count = 0

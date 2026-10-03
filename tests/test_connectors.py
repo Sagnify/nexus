@@ -13,6 +13,7 @@ from backend.connectors.models import ConnectorType, ConnectorStatus, AuthType
 from backend.connectors.manager import ConnectorManager
 from backend.agent.tools.registry import ToolRegistry
 from backend.core.permissions import permission_engine
+from backend.connectors.adapters.google import GoogleAPIAdapter
 
 
 def test_connector_catalog():
@@ -29,6 +30,8 @@ def test_connector_catalog():
     assert gmail is not None
     assert gmail.type == ConnectorType.API
     assert "https://www.googleapis.com/auth/gmail.send" in gmail.required_scopes
+    assert "https://www.googleapis.com/auth/gmail.readonly" in gmail.required_scopes
+    assert "gmail_list_messages" in gmail.default_tools
 
     github = get_catalog_entry("github")
     assert github is not None
@@ -100,6 +103,111 @@ def test_connectors_api_endpoints():
     assert "url" in auth_data
     assert "accounts.google.com" in auth_data["url"]
     assert "gmail.send" in auth_data["url"]
+
+
+@pytest.mark.asyncio
+async def test_gmail_list_messages_reads_metadata_without_sending(monkeypatch):
+    adapter = GoogleAPIAdapter(get_catalog_entry("gmail"))
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            calls.append((url, params))
+            if url.endswith("/messages"):
+                return FakeResponse({"messages": [{"id": "message-1"}]})
+            return FakeResponse({
+                "id": "message-1",
+                "snippet": "A recent inbox message",
+                "payload": {"headers": [
+                    {"name": "From", "value": "sender@example.com"},
+                    {"name": "Subject", "value": "Project update"},
+                    {"name": "Date", "value": "Sat, 03 Oct 2026 10:00:00 +0000"},
+                ]},
+            })
+
+        async def post(self, *args, **kwargs):
+            raise AssertionError("Reading Gmail must not issue a POST request")
+
+    monkeypatch.setattr("backend.connectors.adapters.google.httpx.AsyncClient", lambda **kwargs: FakeClient())
+    result = await adapter._execute_gmail("gmail_list_messages", {"max_results": 1}, "test-token")
+
+    assert result.success is True
+    assert result.metadata["count"] == 1
+    assert result.metadata["messages"][0]["subject"] == "Project update"
+    assert calls[0][1] == {"q": "in:inbox", "maxResults": 1}
+    assert calls[1][1][0] == ("format", "metadata")
+
+
+@pytest.mark.asyncio
+async def test_gmail_brief_reads_full_bodies_and_summarizes_without_sending(monkeypatch):
+    adapter = GoogleAPIAdapter(get_catalog_entry("gmail"))
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            calls.append((url, params))
+            if url.endswith("/messages"):
+                return FakeResponse({"messages": [{"id": "message-2"}], "resultSizeEstimate": 1})
+            return FakeResponse({
+                "id": "message-2",
+                "snippet": "Meeting moved to Friday",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "body": {"data": "TWVldGluZyBtb3ZlZCB0byBGcmlkYXku"},
+                    "headers": [
+                        {"name": "From", "value": "sender@example.com"},
+                        {"name": "Subject", "value": "Schedule change"},
+                        {"name": "Date", "value": "Sat, 03 Oct 2026 10:00:00 +0000"},
+                    ],
+                },
+            })
+
+        async def post(self, *args, **kwargs):
+            raise AssertionError("Summarizing Gmail must not issue a POST request")
+
+    llm_call = AsyncMock(return_value=MagicMock(content="One meeting was moved to Friday."))
+    monkeypatch.setattr("backend.connectors.adapters.google.httpx.AsyncClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr("backend.agent.router.model_router.ainvoke_with_dynamic_switch", llm_call)
+
+    result = await adapter._execute_gmail("gmail_brief_messages", {"max_results": 1}, "test-token")
+
+    assert result.success is True
+    assert result.output == "One meeting was moved to Friday."
+    assert calls[0][1]["q"] == "-from:me"
+    assert calls[1][1] == [("format", "full")]
+    assert "Meeting moved to Friday." in llm_call.await_args.args[0][1].content
 
 
 def test_permission_gate_integration():

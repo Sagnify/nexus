@@ -125,6 +125,22 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
       const days = (def.days || ['monday']).map((d) => d.slice(0, 3).toUpperCase()).join(', ');
       return `Every ${days} at ${def.time || '10:00'}`;
     }
+    if (def.frequency === 'interval') {
+      const minutes = Math.max(1, def.interval_minutes || 60);
+      if (minutes % 10080 === 0) {
+        const weeks = minutes / 10080;
+        return `Every ${weeks} week${weeks === 1 ? '' : 's'}`;
+      }
+      if (minutes % 1440 === 0) {
+        const days = minutes / 1440;
+        return `Every ${days} day${days === 1 ? '' : 's'}`;
+      }
+      if (minutes % 60 === 0) {
+        const hours = minutes / 60;
+        return `Every ${hours} hour${hours === 1 ? '' : 's'}`;
+      }
+      return `Every ${minutes} minute${minutes === 1 ? '' : 's'}`;
+    }
     if (def.frequency === 'monthly') return `Monthly on day ${def.day_of_month || 1} at ${def.time || '09:00'}`;
     return 'Recurring';
   };

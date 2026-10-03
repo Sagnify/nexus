@@ -92,6 +92,7 @@ class PresentationSaveTool(NexusTool):
         session_id: Optional[str] = None,
         default_filename: Optional[str] = None,
         topic: Optional[str] = None,
+        reveal: bool = True,
         **kwargs,
     ) -> ToolResult:
         try:
@@ -156,13 +157,9 @@ class PresentationSaveTool(NexusTool):
                 default_filename=default_filename,
             )
 
-            # Reveal in Windows File Explorer
-            presentation_adapter.reveal_in_explorer(saved_file)
-
-            out_msg = (
-                f"Successfully saved PowerPoint presentation to: {saved_file}\n"
-                f"Opened in File Explorer."
-            )
+            out_msg = f"Successfully saved PowerPoint presentation to: {saved_file}"
+            if reveal and presentation_adapter.reveal_in_explorer(saved_file):
+                out_msg += "\nOpened in File Explorer."
 
             return ToolResult(
                 success=True,

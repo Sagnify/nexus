@@ -70,6 +70,55 @@ class TestScheduleParser(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.next_run_at.hour, 8)
         self.assertEqual(res.next_run_at.minute, 30)
 
+    def test_parse_hourly_received_email_brief_as_automation(self):
+        res = schedule_parser.parse_quick_rule(
+            "Every 1 hour, brief all emails I have received.",
+            user_tz="Asia/Kolkata",
+        )
+
+        self.assertIsNotNone(res)
+        self.assertEqual(res.task_type, "automation")
+        self.assertEqual(res.schedule_type, "recurring")
+        self.assertEqual(res.schedule_definition, {"frequency": "interval", "interval_minutes": 60})
+        self.assertEqual(res.normalized_intent["action"], "gmail_brief_messages")
+        self.assertEqual(res.execution_config["action_type"], "email_brief")
+        self.assertEqual(res.execution_config["required_connectors"], ["gmail"])
+        self.assertNotIn("every 1 hour", res.prompt.lower())
+        self.assertIsNotNone(res.next_run_at)
+
+        shorthand = schedule_parser.parse_quick_rule("Every hour, check my inbox.", user_tz="Asia/Kolkata")
+        self.assertIsNotNone(shorthand)
+        self.assertEqual(shorthand.schedule_definition, {"frequency": "interval", "interval_minutes": 60})
+        self.assertEqual(shorthand.normalized_intent["action"], "gmail_list_messages")
+
+        every_two_days = schedule_parser.parse_quick_rule("Every 2 days, check my inbox.", user_tz="Asia/Kolkata")
+        self.assertIsNotNone(every_two_days)
+        self.assertEqual(every_two_days.schedule_definition, {"frequency": "interval", "interval_minutes": 2880})
+
+        every_two_weeks = schedule_parser.parse_quick_rule("Every two weeks, brief received emails.", user_tz="Asia/Kolkata")
+        self.assertIsNotNone(every_two_weeks)
+        self.assertEqual(every_two_weeks.schedule_definition, {"frequency": "interval", "interval_minutes": 20160})
+
+        daily_at_nine = schedule_parser.parse_quick_rule("Every day at 9 AM, check my inbox.", user_tz="Asia/Kolkata")
+        self.assertIsNotNone(daily_at_nine)
+        self.assertEqual(daily_at_nine.schedule_definition, {"frequency": "daily", "time": "09:00"})
+
+    def test_email_metadata_sends_only_for_explicit_send_action(self):
+        task_type, intent, config = schedule_parser._extract_automation_metadata(
+            "check my latest emails",
+            "check my latest emails",
+        )
+        self.assertEqual(task_type, "automation")
+        self.assertEqual(intent["action"], "gmail_list_messages")
+        self.assertEqual(config["action_type"], "email_read")
+
+        task_type, intent, _ = schedule_parser._extract_automation_metadata(
+            "send an email to person@example.com",
+            "send an email to person@example.com",
+        )
+        self.assertEqual(task_type, "automation")
+        self.assertEqual(intent["action"], "gmail_send_email")
+
     def test_parse_ambiguous_no_time(self):
         prompt = "Remind me to call John"
         res = schedule_parser.parse_quick_rule(prompt, user_tz="Asia/Kolkata")

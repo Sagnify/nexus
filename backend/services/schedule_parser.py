@@ -193,8 +193,13 @@ class ScheduleParser:
         p_lower = clean_prompt.lower()
         r_lower = raw_text.lower()
 
-        # 1. Email intent (e.g. "Send John a happy birthday email", "On October 15, send this email")
-        if re.search(r"\b(?:send|draft|forward)\b", p_lower) and re.search(r"\b(?:email|mail)\b", p_lower) or re.search(r"\b(?:email|mail)\b", p_lower):
+        has_email = bool(re.search(r"\b(?:email|emails|e-mail|e-mails|mail|inbox|message|messages)\b", p_lower))
+        email_action = re.search(r"\b(send|draft|forward)\b", p_lower)
+        is_email_brief = bool(re.search(r"\b(?:brief|digest|summary|summarize|recap|overview)\b", p_lower))
+        is_email_read = bool(re.search(r"\b(?:check|read|show|list|get|fetch|review|search|find|view|brief|digest|summary|summarize|recap|overview)\b", p_lower))
+
+        # Never infer a send from the word "email" alone.
+        if has_email and email_action:
             # Recipient detection
             recipient = ""
             recip_match = re.search(r"(?:to|send)\s+([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)", clean_prompt, re.IGNORECASE)
@@ -218,15 +223,25 @@ class ScheduleParser:
 
             normalized_intent = {
                 "category": "email",
-                "action": "gmail_send_email",
+                "action": "gmail_create_draft" if email_action.group(1) == "draft" else "gmail_send_email",
                 "target": recipient or "recipient",
                 "subject": subject,
             }
             execution_config = {
-                "action_type": "email",
+                "action_type": "email_draft" if email_action.group(1) == "draft" else "email_send",
                 "required_connectors": ["gmail"],
                 "recipient": recipient,
                 "subject": subject,
+                "clean_prompt_template": clean_prompt,
+            }
+            return "automation", normalized_intent, execution_config
+
+        if has_email and is_email_read:
+            action = "gmail_brief_messages" if is_email_brief else "gmail_list_messages"
+            normalized_intent = {"category": "email", "action": action}
+            execution_config = {
+                "action_type": "email_brief" if is_email_brief else "email_read",
+                "required_connectors": ["gmail"],
                 "clean_prompt_template": clean_prompt,
             }
             return "automation", normalized_intent, execution_config
@@ -358,6 +373,12 @@ class ScheduleParser:
         """Generate human-readable task name from intent."""
         category = norm_intent.get("category", "")
         if category == "email":
+            if norm_intent.get("action") == "gmail_brief_messages":
+                return "Brief received emails"
+            if norm_intent.get("action") == "gmail_list_messages":
+                return "Check received emails"
+            if norm_intent.get("action") == "gmail_create_draft":
+                return "Draft email"
             target = norm_intent.get("target") or "recipient"
             if "birthday" in clean_prompt.lower():
                 return f"Send birthday email to {target}"
@@ -424,6 +445,56 @@ class ScheduleParser:
                 normalized_intent={"category": "reminder"},
                 execution_config={"action_type": "reminder", "clean_prompt_template": prompt},
             )
+
+        # ---------------------------------------------------------------------
+        # Pattern: recurring interval, e.g. "every 1 hour, brief received emails"
+        # ---------------------------------------------------------------------
+        interval_match = re.search(
+            r"\bevery\s+(?:(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*)?"
+            r"(minutes?|mins?|hours?|hrs?|days?|weeks?)\b",
+            lower,
+        )
+        if interval_match:
+            amount_text = interval_match.group(1) or "1"
+            number_words = {
+                "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4,
+                "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                "ten": 10, "eleven": 11, "twelve": 12,
+            }
+            amount = int(amount_text) if amount_text.isdigit() else number_words[amount_text]
+            unit = interval_match.group(2)
+            unit_factor = 60 if unit.startswith(("hour", "hr")) else 1440 if unit.startswith("day") else 10080 if unit.startswith("week") else 1
+            interval_minutes = amount * unit_factor
+            has_clock_time = bool(re.search(r"\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b", lower[interval_match.end():]))
+            if interval_minutes > 0 and not has_clock_time:
+                prompt = re.sub(
+                    r"\bevery\s+(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*)?(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\b",
+                    "",
+                    raw,
+                    flags=re.IGNORECASE,
+                )
+                prompt = self._clean_schedule_prompt(prompt)
+                schedule_def = {"frequency": "interval", "interval_minutes": interval_minutes}
+                next_run = calculate_next_run("recurring", schedule_def, tz_name, now)
+                task_type, norm_intent, exec_cfg = self._extract_automation_metadata(
+                    prompt,
+                    raw,
+                    is_explicit_reminder=is_reminder_prefix,
+                )
+                name = self._compute_task_name(prompt, task_type, norm_intent, "Hourly task")
+                return ScheduleParseResult(
+                    is_schedule=True,
+                    task_type=task_type,
+                    name=name,
+                    prompt=prompt or raw,
+                    schedule_type="recurring",
+                    schedule_definition=schedule_def,
+                    timezone=tz_name,
+                    next_run_at=next_run,
+                    confidence=0.98,
+                    normalized_intent=norm_intent,
+                    execution_config=exec_cfg,
+                )
 
         # ---------------------------------------------------------------------
         # 1. Pattern: Specific Calendar Date:

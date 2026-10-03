@@ -22,6 +22,7 @@ import { useVoiceOutput } from './hooks/useVoiceOutput';
 import { TaskState, HistoryItem } from './types/nexus';
 import { formatSpokenResponse } from './utils/speechUtils';
 import { ExcelCopilot } from './components/ExcelCopilot';
+import { EmailBriefView } from './components/EmailBriefView';
 import { getPersonalizedPredictions, recordPredictionFeedback } from './services/recommendationEngine';
 import { classifyQuerySafety } from './services/safetyFilter';
 
@@ -58,6 +59,7 @@ export const App: React.FC = () => {
   const [isSkillsOpen, setIsSkillsOpen] = useState(false);
   const [isScheduleOpen, setIsScheduleOpen] = useState(false);
   const [isConnectorsOpen, setIsConnectorsOpen] = useState(false);
+  const [scheduledEmailBrief, setScheduledEmailBrief] = useState<{ taskId: string; runId: string } | null>(null);
   const [skillsInitialTab, setSkillsInitialTab] = useState<'library' | 'teach'>('library');
   const [isSkillReviewOpen, setIsSkillReviewOpen] = useState(false);
   const [skillSaveError, setSkillSaveError] = useState<string | null>(null);
@@ -89,6 +91,20 @@ export const App: React.FC = () => {
     saveSettings,
   } = useNexus();
 
+  useEffect(() => {
+    if (isPillOnlyWindow) return;
+    const unsubscribe = window.electronAPI?.onScheduledEmailBrief?.((target) => {
+      setScheduledEmailBrief(target);
+      setIsSettingsOpen(false);
+      setIsHistoryOpen(false);
+      setIsSkillsOpen(false);
+      setIsScheduleOpen(false);
+      setIsConnectorsOpen(false);
+      setIsSkillReviewOpen(false);
+    });
+    return () => unsubscribe?.();
+  }, [isPillOnlyWindow]);
+
   const taskStateRef = useRef(taskState);
   taskStateRef.current = taskState;
 
@@ -109,6 +125,7 @@ export const App: React.FC = () => {
 
   const isDedicatedPage = Boolean(
     isScheduleOpen ||
+    Boolean(scheduledEmailBrief) ||
     isSettingsOpen ||
     isConnectorsOpen ||
     isSkillsOpen ||
@@ -720,6 +737,16 @@ export const App: React.FC = () => {
           }}
         />
       </div>
+    );
+  }
+
+  if (scheduledEmailBrief) {
+    return (
+      <EmailBriefView
+        taskId={scheduledEmailBrief.taskId}
+        runId={scheduledEmailBrief.runId}
+        onClose={() => setScheduledEmailBrief(null)}
+      />
     );
   }
 

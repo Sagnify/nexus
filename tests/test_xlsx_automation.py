@@ -190,7 +190,7 @@ class TestSpreadsheetToolsInRegistry(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSpreadsheetPlanner(unittest.IsolatedAsyncioTestCase):
-    async def test_planner_prompts_user_when_no_path_specified(self):
+    async def test_planner_saves_to_desktop_when_no_path_specified(self):
         from backend.agent.nodes.planner import planner_node
         state = {
             "user_input": "write a excel file of top ten champions league goal scorers with their goal count",
@@ -204,9 +204,11 @@ class TestSpreadsheetPlanner(unittest.IsolatedAsyncioTestCase):
         tools = [step["tool"] for step in plan]
         self.assertIn("spreadsheet_create", tools)
         self.assertIn("spreadsheet_write_range", tools)
-        self.assertIn("ask_user", tools)
+        self.assertNotIn("ask_user", tools)
         self.assertIn("spreadsheet_save", tools)
         self.assertNotIn("ai_response", tools)
+        save_step = next(step for step in plan if step["tool"] == "spreadsheet_save")
+        self.assertTrue(save_step["args"]["path"].startswith("Desktop/"))
 
     async def test_planner_uses_explicit_path_when_specified(self):
         from backend.agent.nodes.planner import planner_node

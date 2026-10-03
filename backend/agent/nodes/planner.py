@@ -6,6 +6,7 @@ import uuid
 from langchain_core.messages import SystemMessage, HumanMessage
 from backend.agent.state import NexusState, PlanStep
 from backend.agent.router.model_router import ainvoke_with_dynamic_switch
+from backend.agent.router.email_intents import classify_email_request as _classify_gmail_request
 from backend.core.config import get_groq_api_key, get_gemma_api_key
 from backend.core.policies import RiskLevel, classify_command, classify_file_op
 
@@ -129,6 +130,8 @@ async def _compose_smart_email(goal: str, to_email: str, sender_name: Optional[s
 
 async def _build_active_connector_priority_plan(goal: str, user_id: str = "default", raw_input: str = "", user_name: Optional[str] = None) -> list[dict]:
     """Prefer connected API/MCP connectors over browser or desktop automation."""
+    import re
+
     lower = (goal or "").lower().strip()
     if not lower and not raw_input:
         return []
@@ -144,7 +147,7 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
         return []
 
     connector_matches = [
-        ("gmail", ["gmail", "google mail", "email", "mail"], ["gmail_send_email", "gmail_create_draft"]),
+        ("gmail", ["gmail", "google mail", "email", "mail", "inbox"], ["gmail_list_messages", "gmail_brief_messages", "gmail_send_email", "gmail_create_draft"]),
         ("google_calendar", ["calendar", "meeting", "schedule", "event"], ["calendar_create_event", "calendar_list_events", "calendar_delete_event"]),
         ("spotify", ["spotify", "music", "song", "playlist", "track", "play"], ["spotify_play_track", "spotify_search_tracks"]),
         ("slack", ["slack", "channel", "message"], ["slack_send_message"]),
@@ -167,11 +170,13 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
             creds = credentials_store.get_credential("default", connector_id)
 
         # If credentials exist but tools are not yet in registry (e.g. fresh worker process), register them now
-        if creds and not any(tool_registry.has(name) for name in tool_names):
+        if creds and not all(tool_registry.has(name) for name in tool_names):
             adapter = connector_manager.get_adapter(connector_id)
             defn = get_connector_definition(connector_id)
             if adapter and defn:
                 for dt in (getattr(defn, "default_tools", None) or tool_names):
+                    if tool_registry.has(dt):
+                        continue
                     clean_name = dt.replace(f"{connector_id}_", "")
                     meta = ConnectorToolMetadata(
                         tool_id=f"{connector_id}.{clean_name}",
@@ -184,12 +189,45 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
                     )
                     tool_registry.register(ConnectorTool(meta, adapter, user_id or "default"))
 
-        preferred_tool = next((name for name in tool_names if tool_registry.has(name)), None)
-        if not preferred_tool:
-            continue
-
         if connector_id == "gmail":
-            import re
+            request_kind = _classify_gmail_request(goal)
+            if request_kind == "read":
+                is_brief = bool(re.search(r"\b(?:brief|digest|summary|summarize|overview|recap)\b", lower))
+                read_tool = "gmail_brief_messages" if is_brief else "gmail_list_messages"
+                if not tool_registry.has(read_tool):
+                    return [{
+                        "title": "Gmail Read Access Required",
+                        "description": "Reconnect Gmail with read-only inbox permission to view messages.",
+                        "tool": "ai_response",
+                        "args": {"answer": "Gmail is connected for sending and drafts only. Reconnect Gmail and approve read-only inbox access before I can read or summarize message contents."},
+                        "risk_level": "SAFE",
+                    }]
+                is_all_received = bool(re.search(r"\b(?:all|every|received|entire|everything)\b", lower))
+                query = "-from:me" if is_all_received else "in:inbox"
+                if "unread" in lower:
+                    query += " is:unread"
+                elif "starred" in lower:
+                    query += " is:starred"
+                return [{
+                    "title": "Brief Received Gmail Messages" if is_brief else "Check Recent Gmail Messages",
+                    "description": "Read and summarize message bodies without modifying or sending mail." if is_brief else "Read the newest matching inbox messages without modifying or sending mail.",
+                    "tool": read_tool,
+                    "args": {"query": query, "max_results": 50 if is_brief else 10},
+                    "risk_level": "READ_ONLY",
+                }]
+            if request_kind == "clarify":
+                return [{
+                    "title": "Clarify Gmail Action",
+                    "description": "Ask whether the user wants to read, draft, or send email.",
+                    "tool": "ai_response",
+                    "args": {"answer": "Would you like me to check your inbox, create an email draft, or send an email? I won't send anything unless you explicitly ask me to send it."},
+                    "risk_level": "SAFE",
+                }]
+
+            preferred_tool = next((name for name in tool_names if tool_registry.has(name)), None)
+            if not preferred_tool:
+                continue
+
             account_email = (creds.get("account_identifier") if creds else None) or "sagnify2022@gmail.com"
 
             to_match = re.search(r"\bto\s+([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|[a-zA-Z0-9_]+)\b", goal, re.IGNORECASE)
@@ -220,20 +258,26 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
 
             tool = preferred_tool
             risk_lvl = "PRIVILEGED"
-            if any(w in lower for w in ("save as draft", "save draft", "to drafts")) and tool_registry.has("gmail_create_draft"):
+            if request_kind == "draft" and tool_registry.has("gmail_create_draft"):
                 tool = "gmail_create_draft"
                 risk_lvl = "SAFE"
-            elif tool_registry.has("gmail_send_email"):
+            elif request_kind == "send" and tool_registry.has("gmail_send_email"):
                 tool = "gmail_send_email"
                 risk_lvl = "PRIVILEGED"
+            else:
+                continue
 
             return [{
-                "title": f"Send email to {to_email} via Gmail API",
-                "description": f"Send email '{subject_text}' to {to_email}",
+                "title": f"{'Create draft' if tool == 'gmail_create_draft' else 'Send'} email {'for' if tool == 'gmail_create_draft' else 'to'} {to_email} via Gmail API",
+                "description": f"{'Create a draft' if tool == 'gmail_create_draft' else 'Send'} email '{subject_text}' {'for' if tool == 'gmail_create_draft' else 'to'} {to_email}",
                 "tool": tool,
                 "args": {"to": to_email, "subject": subject_text, "body": body_text},
                 "risk_level": risk_lvl,
             }]
+
+        preferred_tool = next((name for name in tool_names if tool_registry.has(name)), None)
+        if not preferred_tool:
+            continue
         if connector_id == "google_calendar":
             import datetime
             import re
@@ -2012,8 +2056,8 @@ async def _build_dynamic_spreadsheet_plan(goal: str, has_api_key: bool) -> list[
     lower = goal.lower()
     filename, values = await _generate_spreadsheet_data(goal, has_api_key)
 
+    target_path = f"Desktop/{filename}"
     has_explicit = False
-    target_path = ""
     for kw in ("desktop/", "documents/", "c:", "d:", "save to", "save in", "stored in", "put in"):
         if kw in lower:
             has_explicit = True
@@ -2031,18 +2075,6 @@ async def _build_dynamic_spreadsheet_plan(goal: str, has_api_key: bool) -> list[
         {"title": "Format Headers", "description": "Apply bold style and header fill", "tool": "spreadsheet_format_range", "args": {"range": f"A1:{last_col}1", "bold": True, "fill_color": "1F4E78", "color": "FFFFFF", "sheet": "Sheet1"}},
         {"title": "Create Table", "description": "Convert range into Excel table", "tool": "spreadsheet_create_table", "args": {"range": f"A1:{last_col}{len(values)}", "name": "DataTable", "sheet": "Sheet1"}},
     ]
-
-    if not has_explicit:
-        plan.append({
-            "title": "Ask User for Save Location",
-            "description": f"Prompt user to specify target save folder or path for {filename}",
-            "tool": "ask_user",
-            "args": {
-                "prompt": f"Where would you like to save the Excel file ({filename})?",
-                "options": [f"Browse in File Explorer...", f"Desktop/{filename}", f"Documents/{filename}"],
-                "placeholder": f"Click 'Browse in File Explorer...' or type custom file path..."
-            }
-        })
 
     plan.extend([
         {"title": "Save Spreadsheet", "description": f"Save XLSX file to destination", "tool": "spreadsheet_save", "args": {"path": target_path}},
@@ -2081,7 +2113,7 @@ def _extract_clean_presentation_topic(goal: str) -> str:
 
 
 async def _build_dynamic_presentation_plan(goal: str, has_api_key: bool) -> list[dict]:
-    """Build multi-step plan for PowerPoint presentation creation, interactive storage selection, and verification."""
+    """Build a direct PowerPoint generation, save, and verification plan."""
     import re
     lower = goal.lower()
     topic = _extract_clean_presentation_topic(goal)
@@ -2090,8 +2122,8 @@ async def _build_dynamic_presentation_plan(goal: str, has_api_key: bool) -> list
         sanitized = "Presentation"
     filename = f"{sanitized}.pptx"
 
+    target_path = f"Desktop/{filename}"
     has_explicit = False
-    target_path = ""
     for kw in ("desktop/", "documents/", "downloads/", "c:", "d:", "save to", "save in", "stored in", "put in"):
         if kw in lower:
             has_explicit = True
@@ -2103,34 +2135,22 @@ async def _build_dynamic_presentation_plan(goal: str, has_api_key: bool) -> list
     plan = [
         {
             "title": f"Create Presentation on {topic}",
-            "description": f"Generate 16:9 widescreen PowerPoint presentation on '{topic}' with relevant web pictures",
+            "description": f"Generate a 16:9 widescreen PowerPoint presentation on '{topic}'",
             "tool": "presentation_create",
-            "args": {"topic": topic, "theme": "executive_navy", "num_slides": 6, "include_images": True},
+            "args": {"topic": topic, "theme": "executive_navy", "num_slides": 6, "include_images": False},
         },
     ]
-
-    if not has_explicit:
-        plan.append({
-            "title": "Choose Storage Location",
-            "description": f"Prompt user where to store the PowerPoint presentation ({filename})",
-            "tool": "ask_user",
-            "args": {
-                "prompt": f"PowerPoint presentation created on '{topic}'! Where would you like to store the presentation ({filename})?",
-                "options": ["Desktop", "Documents", "Downloads", "Choose via File Explorer..."],
-                "placeholder": f"Select destination or enter custom path (e.g. Desktop/{filename})...",
-                "parameter_name": "target_path",
-            }
-        })
 
     plan.extend([
         {
             "title": "Save Presentation",
-            "description": f"Save PPTX file to destination and reveal in File Explorer",
+            "description": f"Save PPTX file to {target_path}",
             "tool": "presentation_save",
             "args": {
-                "path": target_path or "{{target_path}}",
+                "path": target_path,
                 "default_filename": filename,
                 "topic": topic,
+                "reveal": False,
             },
         },
         {
@@ -2138,11 +2158,87 @@ async def _build_dynamic_presentation_plan(goal: str, has_api_key: bool) -> list
             "description": "Verify saved PPTX file integrity and slides",
             "tool": "presentation_verify",
             "args": {
-                "path": target_path or "{{target_path}}",
+                "path": target_path,
                 "min_slides": 4,
                 "topic": topic,
             },
         },
+    ])
+    return plan
+
+
+async def _build_dynamic_docx_plan(goal: str, has_api_key: bool) -> list[dict]:
+    """Generate document content once, then save it through the DOCX tools."""
+    import re
+
+    if not has_api_key:
+        return [{
+            "title": "Generate Word Document",
+            "description": "Document generation requires a configured language model.",
+            "tool": "ai_response",
+            "args": {"answer": "I couldn't generate the Word document because no language model API key is configured."},
+        }]
+
+    page_match = re.search(r"\b(\d+)\s*pages?\b", goal, re.IGNORECASE)
+    target_words = min(4000, max(300, int(page_match.group(1)) * 400)) if page_match else 700
+    response = await ainvoke_with_dynamic_switch(
+        [
+            SystemMessage(content=(
+                "Write complete, polished content for a Word document based on the user's request. "
+                "This is content generation, not web research or computer automation. Do not browse, "
+                "operate applications, or include planning commentary. Output Markdown only: one '# ' "
+                "title followed by several '## ' section headings and developed prose."
+            )),
+            HumanMessage(content=(
+                f"User request: {goal}\n\n"
+                f"Target approximately {target_words} words (about {page_match.group(1) if page_match else '2'} pages). "
+                "Cover the topic clearly and substantively; avoid filler."
+            )),
+        ],
+        operation="reasoning",
+        temperature=0.3,
+        max_tokens=3000,
+    )
+    content = response.content.strip()
+    if not content:
+        return [{
+            "title": "Generate Word Document",
+            "description": "The language model returned no document content.",
+            "tool": "ai_response",
+            "args": {"answer": "I couldn't generate the Word document because the language model returned an empty response."},
+        }]
+
+    title = "Generated Document"
+    sections: list[tuple[str, str]] = []
+    current_heading = "Overview"
+    current_lines: list[str] = []
+    for line in content.splitlines():
+        if line.startswith("# ") and title == "Generated Document":
+            title = line[2:].strip() or title
+        elif line.startswith("## "):
+            if any(part.strip() for part in current_lines):
+                sections.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading = line[3:].strip() or "Section"
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if any(part.strip() for part in current_lines):
+        sections.append((current_heading, "\n".join(current_lines).strip()))
+    if not sections:
+        sections = [("Overview", content)]
+
+    filename = re.sub(r"[^\w-]+", "_", title).strip("_")[:70] or "Generated_Document"
+    target_path = f"Desktop/{filename}.docx"
+    plan = [
+        {"title": "Create Word Document", "description": "Initialize a DOCX file", "tool": "document_create", "args": {"path": target_path}},
+        {"title": "Add Document Title", "description": "Set the document title", "tool": "document_add_title", "args": {"text": title}},
+    ]
+    for heading, paragraph in sections:
+        plan.append({"title": f"Add {heading}", "description": "Add generated document section heading", "tool": "document_add_heading", "args": {"text": heading, "level": 1}})
+        plan.append({"title": f"Write {heading}", "description": "Add generated section content", "tool": "document_add_paragraph", "args": {"text": paragraph}})
+    plan.extend([
+        {"title": "Save Word Document", "description": f"Save generated document to {target_path}", "tool": "document_save", "args": {"path": target_path}},
+        {"title": "Verify Word Document", "description": "Verify the saved DOCX file", "tool": "document_verify", "args": {"path": target_path, "min_paragraphs": len(sections) + 1}},
     ])
     return plan
 
@@ -2192,6 +2288,8 @@ _normalise_plan = _ensure_step_fields
 
 
 async def _try_match_user_skill(state: NexusState, goal: str) -> Optional[dict]:
+    if _classify_gmail_request(goal) in ("read", "clarify"):
+        return None
     try:
         from backend.database.session import get_session_factory
         session_factory = get_session_factory()
@@ -2462,7 +2560,7 @@ async def planner_node(state: NexusState) -> dict:
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "top", "list", "file", "for"))
     )
     is_docx_creation_query = (
-        any(w in lower_goal for w in ("docx", "word doc", "word document", "report in word")) and
+        any(w in lower_goal for w in ("docx", "word doc", "word document", "word file", "report in word")) and
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "report", "file", "for"))
     )
     is_file_creation_query = (
@@ -2487,6 +2585,8 @@ async def planner_node(state: NexusState) -> dict:
 
     if is_presentation_creation_query:
         plan_data = await _build_dynamic_presentation_plan(goal, has_api_key)
+    elif is_docx_creation_query:
+        plan_data = await _build_dynamic_docx_plan(goal, has_api_key)
     elif is_excel_copilot_request:
         from backend.agent.tools.excel_copilot.planner import build_excel_copilot_plan
         copilot_steps = build_excel_copilot_plan(goal, active_target=active_target, active_context=active_context)
@@ -2616,7 +2716,7 @@ async def planner_node(state: NexusState) -> dict:
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "top", "list", "file"))
     )
     is_docx_creation_query = (
-        any(w in lower_goal for w in ("docx", "word doc", "word document", "report in word")) and
+        any(w in lower_goal for w in ("docx", "word doc", "word document", "word file", "report in word")) and
         any(w in lower_goal for w in ("make", "create", "write", "save", "generate", "build", "export", "report", "file"))
     )
     is_file_creation_query = (
@@ -2628,7 +2728,11 @@ async def planner_node(state: NexusState) -> dict:
     if plan_data:
         has_ai_response = any(item.get("tool") == "ai_response" for item in plan_data)
         is_research_clarification = any("Research Scope" in item.get("title", "") or "Clarification" in item.get("title", "") for item in plan_data)
-        if has_ai_response and not is_research_clarification:
+        is_docx_generation_notice = is_docx_creation_query and any(
+            item.get("tool") == "ai_response" and item.get("title") == "Generate Word Document"
+            for item in plan_data
+        )
+        if has_ai_response and not is_research_clarification and not is_docx_generation_notice:
             if is_presentation_creation_query or any(w in lower_goal for w in ("powerpoint", "power point", "presentation", "slides", "ppt", "pptx")):
                 plan_data = await _build_dynamic_presentation_plan(goal, has_api_key)
             elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
@@ -2670,7 +2774,7 @@ async def planner_node(state: NexusState) -> dict:
             plan_data = _build_google_forms_plan(goal)
         elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
             plan_data = await _build_dynamic_spreadsheet_plan(goal, has_api_key)
-        elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal:
+        elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal or "word file" in lower_goal:
             fast_docx = await _try_fast_path_plan(goal, "file_op", state_messages=state.get("messages"))
             if fast_docx:
                 plan_data = _ensure_step_fields(fast_docx)

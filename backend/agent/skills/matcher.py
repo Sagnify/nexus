@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database.models import Skill, SkillVersion
 from backend.database.repositories.skill_repo import SkillRepository
 from backend.agent.skills.param_extractor import extractor
+from backend.agent.router.artifact_intents import is_artifact_creation_request
 
 logger = logging.getLogger("nexus.skills.matcher")
 
@@ -295,6 +296,9 @@ class SkillMatcher:
         4. Parameter extraction and missing parameter tracking for follow-up
         """
         if not user_prompt or not user_prompt.strip():
+            return None
+        if is_artifact_creation_request(user_prompt):
+            logger.info("[SkillMatcher] Skipping learned skills for explicit office-file creation")
             return None
 
         repo = SkillRepository(session)

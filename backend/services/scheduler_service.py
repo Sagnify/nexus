@@ -263,10 +263,18 @@ class SchedulerService:
                 await repo.update_after_run(task.id, last_run_at=completed_at, next_run_at=next_run, success=False, status_override="blocked")
                 if session:
                     await session.commit()
+                notification_action = None
+                if (task.normalized_intent or {}).get("action") == "gmail_brief_messages":
+                    notification_action = {
+                        "type": "email_brief",
+                        "task_id": str(task.id),
+                        "run_id": str(run.id),
+                    }
                 await send_user_notification(
                     f"Scheduled Automation Blocked: {task.name}",
                     f"Action Required: '{conn_id}' connector authorization missing.",
-                    notification_type="automation",
+                    notification_type="email_brief" if notification_action else "automation",
+                    action=notification_action,
                 )
                 return
 
@@ -364,11 +372,29 @@ class SchedulerService:
 
         # Notify user of completion or failure
         title = f"Scheduled Automation: {task.name}"
+        notification_action = None
+        is_email_brief = (task.normalized_intent or {}).get("action") == "gmail_brief_messages"
+        if is_email_brief:
+            notification_action = {
+                "type": "email_brief",
+                "task_id": str(task.id),
+                "run_id": str(run.id),
+            }
         if success:
             body = f"Success. Generated {len(artifacts)} artifact(s)." if artifacts else final_resp[:120]
+            if is_email_brief:
+                title = "Your email brief is ready"
+                body = final_resp[:220]
         else:
+            if is_email_brief:
+                title = "Email brief could not be created"
             body = f"Execution failed: {err_msg or 'unknown error'}"
-        await send_user_notification(title, body, notification_type="automation")
+        await send_user_notification(
+            title,
+            body,
+            notification_type="email_brief" if notification_action else "automation",
+            action=notification_action,
+        )
 
     def _collect_artifacts(
         self,

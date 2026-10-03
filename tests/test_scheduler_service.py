@@ -76,6 +76,39 @@ class TestSchedulerService(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runs[0].status, "completed")
             self.assertIn("Delivered reminder", runs[0].result)
 
+    async def test_actionable_email_brief_notification_uses_electron_bridge(self):
+        from backend.services.notification_service import send_user_notification
+
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url, json):
+                captured["url"] = url
+                captured["payload"] = json
+                return FakeResponse()
+
+        with patch("backend.services.notification_service.httpx.AsyncClient", lambda **kwargs: FakeClient()):
+            with patch("backend.services.notification_service.show_windows_toast") as toast:
+                await send_user_notification(
+                    "Your email brief is ready",
+                    "Two important updates arrived.",
+                    notification_type="email_brief",
+                    action={"type": "email_brief", "task_id": "task-1", "run_id": "run-1"},
+                )
+
+        self.assertEqual(captured["url"], "http://127.0.0.1:8765/scheduled-email-brief")
+        self.assertEqual(captured["payload"]["action"], {"type": "email_brief", "task_id": "task-1", "run_id": "run-1"})
+        toast.assert_not_called()
+
     async def test_missed_policy_skip(self):
         now = datetime.now(timezone.utc)
         # 1 hour ago -> exceeds 15 minutes threshold

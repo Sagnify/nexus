@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, shell } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, session, shell, Notification } from 'electron';
 
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -271,6 +271,49 @@ function startLoopbackServer() {
         mainWindow?.webContents.send('remote-teach-finished');
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok: true, status: 'teach_finished' }));
+        return;
+      }
+
+      if (urlPath === '/scheduled-email-brief' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk.toString();
+          if (body.length > 16_384) req.destroy();
+        });
+        req.on('end', () => {
+          try {
+            const payload = JSON.parse(body);
+            const action = payload?.action;
+            if (!Notification.isSupported() || action?.type !== 'email_brief' || !action.task_id || !action.run_id) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, error: 'Unsupported notification action' }));
+              return;
+            }
+
+            const notification = new Notification({
+              title: String(payload.title || 'Your email brief is ready').slice(0, 120),
+              body: String(payload.message || 'Click to review your email brief.').slice(0, 500),
+            });
+            notification.on('click', () => {
+              showWindow();
+              const deliver = () => mainWindow?.webContents.send('open-scheduled-email-brief', {
+                taskId: String(action.task_id),
+                runId: String(action.run_id),
+              });
+              if (mainWindow?.webContents.isLoading()) {
+                mainWindow.webContents.once('did-finish-load', deliver);
+              } else {
+                deliver();
+              }
+            });
+            notification.show();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } catch {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: false, error: 'Invalid notification payload' }));
+          }
+        });
         return;
       }
 
