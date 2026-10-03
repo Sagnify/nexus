@@ -333,8 +333,10 @@ class ParameterExtractor:
             logger.warning("Invalid prompt provided")
             prompt = ""
 
-        if not parameter_schema or not isinstance(parameter_schema, list):
+        if parameter_schema is None or not isinstance(parameter_schema, list):
             logger.warning("Invalid parameter_schema provided")
+            return resolved, missing
+        if len(parameter_schema) == 0:
             return resolved, missing
 
         for param in parameter_schema:

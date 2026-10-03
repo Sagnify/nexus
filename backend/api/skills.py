@@ -543,7 +543,7 @@ async def stop_teach_session(
                         steps_json=d_dict.get("steps", []),
                         preconditions=d_dict.get("preconditions", []),
                         postconditions=d_dict.get("postconditions", []),
-                        is_draft=True,
+                        is_draft=False,
                     )
                     logger.info("[SkillCompiler] 💾 Skill persisted to database in background: %s", saved_skill.id)
                     break

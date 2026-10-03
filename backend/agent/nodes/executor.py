@@ -604,6 +604,55 @@ def _propagate_user_param_input(param_name: str, user_val: str, plan: list[dict]
                     if isinstance(v, str) and token in v:
                         st["args"][k] = v.replace(token, clean_val)
 
+    # Special handling for composite form_fields parameter in form creation plans
+    if param_name == "form_fields":
+        raw = clean_val
+        title = "Form"
+        fields_str = raw
+        if "(" in raw and ")" in raw:
+            parts = raw.split("(", 1)
+            title = parts[0].strip().rstrip(":- ")
+            fields_str = parts[1].rstrip(")")
+        elif ":" in raw:
+            parts = raw.split(":", 1)
+            title = parts[0].strip()
+            fields_str = parts[1].strip()
+
+        fields = [f.strip(" ,.;:'\"") for f in re.split(r"[,;]\s*|\band\b", fields_str) if f.strip(" ,.;:'\"")]
+        if not fields:
+            fields = ["Name", "Email", "Phone Number", "Message"]
+
+        sub_map = {
+            "form_title": title,
+            "question_1": fields[0] if len(fields) > 0 else "Name",
+            "question_2": fields[1] if len(fields) > 1 else "Email",
+            "question_3": fields[2] if len(fields) > 2 else "Details",
+            "question_4": fields[3] if len(fields) > 3 else "Comments",
+        }
+        for sub_k, sub_v in sub_map.items():
+            state["resolved_params"][sub_k] = sub_v
+            t = f"{{{{{sub_k}}}}}"
+            for st in plan:
+                if st.get("status") == "pending":
+                    if st.get("title") and t in st["title"]:
+                        st["title"] = st["title"].replace(t, sub_v)
+                    if st.get("description") and t in st["description"]:
+                        st["description"] = st["description"].replace(t, sub_v)
+                    if st.get("args"):
+                        for k, v in list(st["args"].items()):
+                            if isinstance(v, str) and t in v:
+                                st["args"][k] = v.replace(t, sub_v)
+
+        # If user specified fewer than 4 fields, skip redundant extra question steps
+        if len(fields) < 4:
+            for extra_idx in range(len(fields) + 1, 5):
+                for st in plan:
+                    if st.get("status") == "pending" and (
+                        f"Question {extra_idx}" in (st.get("title") or "")
+                        or f"{{{{question_{extra_idx}}}}}" in str(st)
+                    ):
+                        st["status"] = "skipped"
+
 
 def get_nexus_system_prompt() -> str:
     now_str = datetime.datetime.now().strftime("%A, %B %d, %Y %I:%M:%S %p")

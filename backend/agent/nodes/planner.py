@@ -547,6 +547,7 @@ Guidelines for Web Requests:
 - For search queries on search engines or video/content platforms (e.g. "search coldplay on youtube", "search quantum computing on google", "search reddit for mechanical keyboards"), navigate DIRECTLY to the platform's search results URL with the encoded query! (e.g. "https://www.youtube.com/results?search_query=coldplay" or "https://www.google.com/search?q=quantum+computing"). Do NOT do slow multi-step homepage loading and typing when a direct search URL exists!
 - When typing into search boxes, query inputs, or chat composers using `browser_type`, ALWAYS set "press_enter": true so the search or message is immediately submitted! Never leave text unsubmitted in a search box.
 - For interactive tasks (forms, multi-step navigation, clicks), chain `browser_navigate` -> `browser_inspect` -> `browser_click`/`browser_type`.
+- For Google Forms or form automation: NEVER stop at simply navigating to the forms page or dismissing preview dialogs! A form creation task requires actively setting the form title and adding each requested question/field. If the user did not specify fields, start with `ask_user` to prompt for desired fields/presets, then build the form with those fields.
 - Tab Preservation: Never close any tabs unnecessarily or replace URLs of existing user tabs. If a web service is already open, prefer switching to it (`browser_switch_tab`).
 
 DOCX Document Automation Tools:
@@ -1059,6 +1060,137 @@ Feel free to reply with your choices or any specific angles you'd like me to cov
 
 
 
+def _build_google_forms_plan(goal: str) -> list[dict]:
+    """Build interactive Google Form creation plan with field prompting via ask_user."""
+    import re
+    lower = goal.lower().strip()
+
+    # Check if user specified fields in their prompt
+    fields_match = re.search(r"(?:with|containing|having|fields?|questions?)\s+(.+)", goal, re.IGNORECASE)
+    specified_fields = []
+    if fields_match:
+        raw_fields = fields_match.group(1).strip()
+        raw_fields = re.split(r"\b(?:and\s+save|then|please)\b", raw_fields, flags=re.IGNORECASE)[0]
+        tokens = [f.strip(" ,.;:'\"") for f in re.split(r"[,;]\s*|\band\b", raw_fields) if f.strip(" ,.;:'\"")]
+        specified_fields = [
+            t for t in tokens
+            if len(t) >= 2 and not any(skip == t.lower() for skip in ("google", "form", "forms", "a", "the", "new", "fields", "questions"))
+        ]
+
+    # Inferred or extracted form title
+    title_match = re.search(r"(?:titled|named|called|for)\s+['\"]([^'\"]+)['\"]", goal, re.IGNORECASE)
+    if title_match:
+        form_title = title_match.group(1).strip()
+    elif "contact" in lower:
+        form_title = "Contact Form"
+    elif "registration" in lower or "register" in lower:
+        form_title = "Registration Form"
+    elif "feedback" in lower or "survey" in lower:
+        form_title = "Feedback Survey"
+    else:
+        form_title = "Automation Form"
+
+    steps = []
+
+    # If the user did not specify fields in their prompt, ask them via ask_user!
+    if not specified_fields:
+        steps.append({
+            "title": "Ask User for Form Fields",
+            "description": "Ask user what fields or questions to include in the Google Form",
+            "tool": "ask_user",
+            "args": {
+                "prompt": "What fields or questions would you like to add to this Google Form?",
+                "options": [
+                    "Contact Form (Name, Email, Phone Number, Message)",
+                    "Event Registration (Name, Email, RSVP, Dietary Requirements)",
+                    "Feedback Survey (Rating, Experience Feedback, Suggestions)",
+                    "Job Application (Name, Email, Resume Link, Experience)",
+                ],
+                "parameter_name": "form_fields",
+                "placeholder": "e.g. Name, Email, Department, Joining Date",
+            },
+            "risk_level": "safe",
+        })
+        fields_to_create = ["{{question_1}}", "{{question_2}}", "{{question_3}}", "{{question_4}}"]
+        active_title = "{{form_title}}"
+    else:
+        fields_to_create = specified_fields
+        active_title = form_title
+
+    # 1. Open Google Forms
+    steps.append({
+        "title": "Open Google Forms",
+        "description": "Open Google Forms editor in browser",
+        "tool": "browser_navigate",
+        "args": {"url": "https://forms.new"},
+    })
+
+    # 2. Dismiss onboarding / Gemini preview dialog
+    steps.append({
+        "title": "Dismiss Popups & Gemini Dialog",
+        "description": "Dismiss onboarding dialogs and Help me write popup",
+        "tool": "browser_dismiss_popup",
+        "args": {},
+    })
+
+    # 3. Wait for Form to render
+    steps.append({
+        "title": "Wait for Form Load",
+        "description": "Allow form editor DOM to stabilize",
+        "tool": "browser_wait",
+        "args": {"timeout_seconds": 2.0},
+    })
+
+    # 4. Set Form Title
+    steps.append({
+        "title": f"Set Form Title: {active_title}",
+        "description": "Enter form title",
+        "tool": "browser_type",
+        "args": {
+            "selector": "input[aria-label*='Form title' i], [role='heading'][contenteditable='true']",
+            "text": active_title,
+            "clear_first": True,
+        },
+    })
+
+    # 5. Populate first question
+    first_field = fields_to_create[0] if fields_to_create else "Name"
+    steps.append({
+        "title": f"Set Question 1: {first_field}",
+        "description": "Set Question 1 title",
+        "tool": "browser_type",
+        "args": {
+            "selector": "div[role='listitem'] [contenteditable='true'], [aria-label*='Question title'], [role='heading'][contenteditable='true']",
+            "text": first_field,
+            "clear_first": True,
+        },
+    })
+
+    # 6. Add subsequent questions with the '+' button
+    for idx, field in enumerate(fields_to_create[1:], start=2):
+        steps.append({
+            "title": f"Add Question {idx}",
+            "description": "Click Add question button",
+            "tool": "browser_click",
+            "args": {
+                "selector": "[aria-label*='Add question'], div[data-tooltip*='Add question'], div[role='button'][aria-label*='question']",
+                "text": "Add question",
+            },
+        })
+        steps.append({
+            "title": f"Type Question {idx}: {field}",
+            "description": f"Set Question {idx} title",
+            "tool": "browser_type",
+            "args": {
+                "selector": "div[role='listitem']:last-of-type [contenteditable='true'], div[aria-selected='true'] [contenteditable='true'], [aria-label*='Question title']",
+                "text": field,
+                "clear_first": True,
+            },
+        })
+
+    return steps
+
+
 async def _try_fast_path_plan(
     goal: str,
     intent: str,
@@ -1492,20 +1624,9 @@ async def _try_fast_path_plan(
                     {"title": f"Open {site_name.capitalize()}", "description": f"Navigate to {site_url}", "tool": "browser_navigate", "args": {"url": site_url}},
                 ]
 
-    # 4. Google Form creation
-    if any(w in lower for w in ("google form", "google forms", "forms.new")) or ("form" in lower and any(w in lower for w in ("make", "create", "build", "new"))):
-        second_field = "Email" if "email" in lower else "Phone Number" if "phone" in lower else "Details"
-        form_title = "Contact Form" if any(w in lower for w in ("contact", "email", "phone")) else "Registration Form"
-        return [
-            {"title": "Open Google Forms", "description": "Open Google Forms in browser", "tool": "browser_navigate", "args": {"url": "https://forms.new"}},
-            {"title": "Wait for Form Load", "description": "Allow form editor to render", "tool": "browser_wait", "args": {"timeout_seconds": 1.5}},
-            {"title": "Set Form Title", "description": "Enter form title", "tool": "browser_type", "args": {"selector": "input[aria-label*='Form title' i], [role='heading'][contenteditable='true']", "text": form_title}},
-            {"title": "Type Name Question", "description": "Set Question 1 to Name", "tool": "browser_type", "args": {"selector": "div[role='listitem'] [contenteditable='true']", "text": "Name"}},
-            {"title": "Open Question Type Menu", "description": "Click question type dropdown", "tool": "browser_click", "args": {"selector": "div[role='listitem'] div[role='listbox'], div[role='listitem'] [aria-label*='Question type' i]", "text": "Multiple choice"}},
-            {"title": "Select Short Answer Type", "description": "Switch Question 1 to Short answer", "tool": "browser_click", "args": {"selector": "div[role='option'][data-value='0'], div[role='option'] span", "text": "Short answer"}},
-            {"title": f"Add {second_field} Question", "description": "Add new question item", "tool": "browser_click", "args": {"selector": "div[aria-label*='Add question' i], button[aria-label*='Add question' i]", "text": "Add question"}},
-            {"title": f"Type {second_field} Question", "description": f"Set Question 2 to {second_field}", "tool": "browser_type", "args": {"selector": "div[role='listitem']:last-of-type [contenteditable='true']", "text": second_field}},
-        ]
+    # 4. Google Form creation & automation
+    if any(w in lower for w in ("google form", "google forms", "forms.new", "gform")) or ("form" in lower and any(w in lower for w in ("make", "create", "build", "new", "automate", "automation"))):
+        return _build_google_forms_plan(goal)
 
     # 5. Email Composition & Sending (Gmail API Connector first, Webmail fallback second)
     if any(w in lower for w in ("email", "mail", "gmail")) and any(w in lower for w in ("send", "compose", "write", "draft")):
@@ -2525,19 +2646,8 @@ async def planner_node(state: NexusState) -> dict:
                 "tool": "get_current_time",
                 "args": {}
             }]
-        elif any(w in lower_goal for w in ("google form", "google forms", "forms.new")) or ("form" in lower_goal and any(w in lower_goal for w in ("make", "create", "build", "new", "containing", "name", "phone", "email"))):
-            second_field = "Email" if "email" in lower_goal else "Phone Number" if "phone" in lower_goal else "Details"
-            form_title = "Contact Form" if any(w in lower_goal for w in ("contact", "email", "phone")) else "Registration Form"
-            plan_data = [
-                {"title": "Open Google Forms", "description": "Open Google Forms in browser", "tool": "browser_navigate", "args": {"url": "https://forms.new"}},
-                {"title": "Wait for Form Load", "description": "Allow form editor to render", "tool": "browser_wait", "args": {"timeout_seconds": 2.0}},
-                {"title": "Set Form Title", "description": "Enter form title", "tool": "browser_type", "args": {"selector": "input[aria-label*='Form title' i], [role='heading'][contenteditable='true']", "text": form_title}},
-                {"title": "Type Name Question", "description": "Set Question 1 to Name", "tool": "browser_type", "args": {"selector": "div[role='listitem'] [contenteditable='true']", "text": "Name"}},
-                {"title": "Open Question Type Menu", "description": "Click question type dropdown on Question 1", "tool": "browser_click", "args": {"selector": "div[role='listitem'] div[role='listbox'], div[role='listitem'] [aria-label*='Question type' i]", "text": "Multiple choice"}},
-                {"title": "Select Short Answer Type", "description": "Switch Question 1 to Short answer", "tool": "browser_click", "args": {"selector": "div[role='option'][data-value='0'], div[role='option'] span", "text": "Short answer"}},
-                {"title": f"Add {second_field} Question", "description": "Add new question item", "tool": "browser_click", "args": {"selector": "div[aria-label*='Add question' i], button[aria-label*='Add question' i]", "text": "Add question"}},
-                {"title": f"Type {second_field} Question", "description": f"Set Question 2 to {second_field}", "tool": "browser_type", "args": {"selector": "div[role='listitem']:last-of-type [contenteditable='true']", "text": second_field}},
-            ]
+        elif any(w in lower_goal for w in ("google form", "google forms", "forms.new", "gform")) or ("form" in lower_goal and any(w in lower_goal for w in ("make", "create", "build", "new", "automate", "automation", "containing", "name", "phone", "email"))):
+            plan_data = _build_google_forms_plan(goal)
         elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
             plan_data = await _build_dynamic_spreadsheet_plan(goal, has_api_key)
         elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal:
