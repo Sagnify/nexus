@@ -21,7 +21,7 @@ const PILL_COLLAPSED_HEIGHT = 68;
 const PILL_TOP_Y = 20;
 let lastSyncedTaskState: any = null;
 let lastSyncedTeachState: any = null;
-let pendingEmailBriefTarget: { taskId: string; runId: string } | null = null;
+let pendingScheduledTaskResponse: { taskId: string; runId: string } | null = null;
 let mainRendererReady = false;
 
 // ---------------------------------------------------------------------------
@@ -286,7 +286,7 @@ function startLoopbackServer() {
         return;
       }
 
-      if (urlPath === '/scheduled-email-brief' && req.method === 'POST') {
+      if (urlPath === '/scheduled-task-response' && req.method === 'POST') {
         let body = '';
         req.on('data', (chunk) => {
           body += chunk.toString();
@@ -296,7 +296,7 @@ function startLoopbackServer() {
           try {
             const payload = JSON.parse(body);
             const action = payload?.action;
-            if (!Notification.isSupported() || action?.type !== 'email_brief' || !action.task_id || !action.run_id) {
+            if (!Notification.isSupported() || action?.type !== 'scheduled_task_response' || !action.task_id || !action.run_id) {
               res.writeHead(400, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ ok: false, error: 'Unsupported notification action' }));
               return;
@@ -307,14 +307,14 @@ function startLoopbackServer() {
               body: String(payload.message || 'Click to review your email brief.').slice(0, 500),
             });
             notification.on('click', () => {
-              pendingEmailBriefTarget = {
+              pendingScheduledTaskResponse = {
                 taskId: String(action.task_id),
                 runId: String(action.run_id),
               };
               showWindow();
               if (mainRendererReady && mainWindow && !mainWindow.webContents.isLoading()) {
-                mainWindow.webContents.send('open-scheduled-email-brief', pendingEmailBriefTarget);
-                pendingEmailBriefTarget = null;
+                mainWindow.webContents.send('open-scheduled-task-response', pendingScheduledTaskResponse);
+                pendingScheduledTaskResponse = null;
               }
             });
             notification.show();
@@ -805,12 +805,12 @@ if (!gotTheLock) {
       }
     });
 
-    ipcMain.on('scheduled-email-brief-ready', (event) => {
+    ipcMain.on('scheduled-task-response-ready', (event) => {
       if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
       mainRendererReady = true;
-      if (pendingEmailBriefTarget && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('open-scheduled-email-brief', pendingEmailBriefTarget);
-        pendingEmailBriefTarget = null;
+      if (pendingScheduledTaskResponse && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('open-scheduled-task-response', pendingScheduledTaskResponse);
+        pendingScheduledTaskResponse = null;
       }
     });
 

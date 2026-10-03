@@ -195,8 +195,15 @@ class ScheduleParser:
 
         has_email = bool(re.search(r"\b(?:email|emails|e-mail|e-mails|mail|inbox|message|messages)\b", p_lower))
         email_action = re.search(r"\b(send|draft|forward)\b", p_lower)
-        is_email_brief = bool(re.search(r"\b(?:brief|digest|summary|summarize|recap|overview)\b", p_lower))
-        is_email_read = bool(re.search(r"\b(?:check|read|show|list|get|fetch|review|search|find|view|brief|digest|summary|summarize|recap|overview)\b", p_lower))
+        is_email_notification = bool(re.search(r"\b(?:notify|alert)\b", p_lower)) and bool(
+            re.search(r"\b(?:new|recent|received|unread|inbox)\b", p_lower)
+        )
+        is_email_brief = is_email_notification or bool(
+            re.search(r"\b(?:brief|digest|summary|summarize|recap|overview)\b", p_lower)
+        )
+        is_email_read = is_email_notification or bool(
+            re.search(r"\b(?:check|read|show|list|get|fetch|review|search|find|view|brief|digest|summary|summarize|recap|overview)\b", p_lower)
+        )
 
         # Never infer a send from the word "email" alone.
         if has_email and email_action:

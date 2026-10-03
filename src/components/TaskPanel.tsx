@@ -23,6 +23,7 @@ interface TaskPanelProps {
   isSpeaking?: boolean;
   onSpeak?: (text: string) => void;
   onStopSpeaking?: () => void;
+  onOpenScheduledTaskResponse?: (taskId: string) => void;
 }
 
 export const TaskPanel: React.FC<TaskPanelProps> = ({
@@ -38,6 +39,7 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
   isSpeaking = false,
   onSpeak,
   onStopSpeaking,
+  onOpenScheduledTaskResponse,
 }) => {
   const [showObservations, setShowObservations] = useState(false);
   const [showRationale, setShowRationale] = useState(false);
@@ -536,7 +538,7 @@ export const TaskPanel: React.FC<TaskPanelProps> = ({
 
         {/* Interactive Live Clock & Calendar Widget (or Final Response) */}
         {isDateTimeQuery ? (
-          <DateTimeCard userQuery={taskState.goal || ''} />
+          <DateTimeCard userQuery={taskState.goal || ''} onOpenTaskResponse={onOpenScheduledTaskResponse} />
         ) : (
           taskState.finalResponse && (
             <div className="relative p-4 rounded-xl bg-white/[0.02] border border-white/[0.07] text-neutral-200 space-y-3 transition-all">

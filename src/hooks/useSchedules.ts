@@ -255,6 +255,15 @@ export const useSchedules = () => {
     return await res.json();
   }, [getHeaders]);
 
+  const fetchTask = useCallback(async (taskId: string): Promise<ScheduledTaskData> => {
+    const headers = await getHeaders();
+    const res = await fetch(`http://localhost:8000/api/scheduled-tasks/${taskId}`, { headers });
+    if (!res.ok) {
+      throw new Error('Failed to load scheduled task');
+    }
+    return await res.json();
+  }, [getHeaders]);
+
   return {
     tasks,
     deviceId,
@@ -269,5 +278,6 @@ export const useSchedules = () => {
     moveToThisDevice,
     deleteTask,
     fetchRuns,
+    fetchTask,
   };
 };

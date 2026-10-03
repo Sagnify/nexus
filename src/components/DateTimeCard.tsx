@@ -18,6 +18,7 @@ import {
   X,
   Bell,
   Zap,
+  FileText,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
@@ -48,9 +49,10 @@ export interface ScheduledTaskItem {
 
 interface DateTimeCardProps {
   userQuery?: string;
+  onOpenTaskResponse?: (taskId: string) => void;
 }
 
-export const DateTimeCard: React.FC<DateTimeCardProps> = ({ userQuery = '' }) => {
+export const DateTimeCard: React.FC<DateTimeCardProps> = ({ userQuery = '', onOpenTaskResponse }) => {
   const { user } = useAuth();
   const [now, setNow] = useState(new Date());
 
@@ -860,6 +862,14 @@ export const DateTimeCard: React.FC<DateTimeCardProps> = ({ userQuery = '' }) =>
                                 </p>
                               )}
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => onOpenTaskResponse?.(task.id)}
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-amber-200/70 hover:bg-amber-500/15 hover:text-amber-100"
+                              title="Open latest response"
+                            >
+                              <FileText className="h-3.5 w-3.5" />
+                            </button>
                           </div>
                         ))}
                     </div>

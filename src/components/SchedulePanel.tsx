@@ -29,9 +29,10 @@ import {
 interface SchedulePanelProps {
   onClose: () => void;
   onRunPrompt?: (prompt: string) => void;
+  onOpenResponse?: (taskId: string) => void;
 }
 
-export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunPrompt }) => {
+export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunPrompt, onOpenResponse }) => {
   const {
     tasks,
     deviceId,
@@ -477,6 +478,15 @@ export const SchedulePanel: React.FC<SchedulePanelProps> = ({ onClose, onRunProm
                       title="Run immediately"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenResponse?.(task.id)}
+                      className="p-1.5 rounded-lg text-white/50 hover:text-sky-300 hover:bg-sky-500/15 transition-colors border border-transparent hover:border-sky-500/25"
+                      title="Open latest response"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
                     </button>
 
                     {/* Execution Runs Drawer */}
