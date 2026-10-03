@@ -84,8 +84,19 @@ async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bo
             if not resume:
                 await push_event(task_id, "status", {"status": "thinking", "message": "Analyzing intent..."})
 
+            input_state = None
+            if not resume:
+                input_state = initial_state
+            else:
+                try:
+                    cp = await nexus_graph.aget_state(config)
+                    if not cp or not cp.values:
+                        input_state = _task_states.get(task_id) or initial_state
+                except Exception:
+                    input_state = _task_states.get(task_id) or initial_state
+
             async for output in nexus_graph.astream(
-                None if resume else initial_state,
+                input_state,
                 config=config,
                 stream_mode="updates"
             ):
@@ -259,6 +270,7 @@ async def run_agent_workflow(task_id: str, initial_state: NexusState, resume: bo
             await push_event(task_id, "done", {})
             return
         except Exception as e:
+            logger.exception(f"[Task Execution] Task {task_id} encountered exception: {e}")
             retry_count += 1
             if retry_count > max_retries:
                 try:

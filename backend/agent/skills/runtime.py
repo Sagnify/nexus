@@ -97,13 +97,18 @@ class SkillRuntime:
             or st.get("selector")
             or st.get("xpath")
         )
+        action_type = st.get("action_type", "")
         text = bundle.get("textAnchor") or st.get("text") or st.get("textAnchor")
-        if not text and st.get("title"):
+        if not text and st.get("title") and action_type != "browser_type":
             m = re.search(r"['\"]([^'\"]+)['\"]", st.get("title", ""))
             if m:
                 text = m.group(1)
-        if not primary and text:
+        if not primary and text and action_type != "browser_type":
             primary = f"text={text}" if text.lower() != "button" else "button"
+
+        # For browser_type where no explicit selector was captured, target generic inputs
+        if not primary and action_type == "browser_type":
+            primary = "input[type='search'], input[name*='search' i], input[placeholder*='search' i], input[type='text'], input:not([type]), textarea, [contenteditable='true']"
 
         meta = st.get("metadata") or {}
         vlm_feat = meta.get("vlm_features") or st.get("vlm_features") or bundle.get("vlm_features") or {}
@@ -277,6 +282,46 @@ class SkillRuntime:
             })
 
         # --- 2. Skill workflow steps with full action type coverage ---
+        # Ensure browser workflow establishes starting route at step 0 if recorded without initial navigation
+        has_browser_actions = any(
+            s.get("execution_engine", "browser") == "browser"
+            and s.get("action_type") in ("browser_click", "browser_type", "browser_select", "browser_press")
+            for s in raw_steps
+        )
+        first_is_nav = bool(raw_steps and raw_steps[0].get("action_type") == "browser_navigate")
+        if has_browser_actions and not first_is_nav:
+            target_url = None
+            t_sites = getattr(match.skill, "target_sites", []) or []
+            if not t_sites and match.version and getattr(match.version, "metadata_json", None):
+                t_sites = match.version.metadata_json.get("target_sites", [])
+            if t_sites:
+                h = t_sites[0]
+                target_url = h if h.startswith("http") else f"https://{h}"
+
+            if not target_url:
+                for s in raw_steps:
+                    u = s.get("url") or (s.get("metadata") or {}).get("url")
+                    if u and (u.startswith("http://") or u.startswith("https://")):
+                        from urllib.parse import urlparse
+                        p = urlparse(u)
+                        target_url = f"{p.scheme}://{p.netloc}"
+                        break
+
+            if target_url:
+                from urllib.parse import urlparse
+                domain = urlparse(target_url).netloc
+                steps.append({
+                    "id": f"skill-nav-{uuid.uuid4().hex[:6]}",
+                    "title": f"Open {domain or 'Target Site'}",
+                    "description": f"Navigate browser to {target_url} to begin '{match.skill.name}' workflow",
+                    "tool": "browser_navigate",
+                    "args": {"url": target_url},
+                    "risk_level": RiskLevel.SAFE.value,
+                    "status": "pending",
+                    "result": None,
+                    "error": None,
+                })
+
         for idx, s in enumerate(raw_steps):
             action_type = s.get("action_type", "")
             engine = s.get("execution_engine", "browser")

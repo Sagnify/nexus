@@ -309,7 +309,11 @@ class SkillMatcher:
             if not skill.versions:
                 continue
 
-            for trigger in skill.trigger_phrases or []:
+            triggers_to_check = list(skill.trigger_phrases or [])
+            if skill.name and skill.name not in triggers_to_check:
+                triggers_to_check.insert(0, skill.name)
+
+            for trigger in triggers_to_check:
                 norm_trig = self._normalize_text(trigger)
                 # Exact normalized trigger
                 if norm_trig == norm_query:

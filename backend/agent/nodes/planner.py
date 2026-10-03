@@ -2191,8 +2191,182 @@ def _ensure_step_fields(raw_steps: list[dict]) -> list[dict]:
 _normalise_plan = _ensure_step_fields
 
 
+async def _try_match_user_skill(state: NexusState, goal: str) -> Optional[dict]:
+    try:
+        from backend.database.session import get_session_factory
+        session_factory = get_session_factory()
+        user_id_val = state.get("user_id")
+        if session_factory:
+            uid = None
+            if user_id_val:
+                try:
+                    uid = uuid.UUID(str(user_id_val)) if isinstance(user_id_val, str) else user_id_val
+                except Exception:
+                    uid = None
+            if not uid:
+                from backend.core.firebase_auth import LOCAL_USER_ID
+                uid = LOCAL_USER_ID
+
+            async with session_factory() as db_session:
+                if uid:
+                    from backend.agent.skills.matcher import matcher
+                    from backend.agent.skills.runtime import runtime
+                    raw_query = state.get("user_input", "").strip() or goal
+                    matched = await matcher.match_skill(raw_query, uid, db_session)
+                    if not matched and goal and goal != raw_query:
+                        matched = await matcher.match_skill(goal, uid, db_session)
+                    if not matched and uid != LOCAL_USER_ID:
+                        matched = await matcher.match_skill(raw_query, LOCAL_USER_ID, db_session)
+                        if not matched and goal and goal != raw_query:
+                            matched = await matcher.match_skill(goal, LOCAL_USER_ID, db_session)
+
+                    if matched and not matched.is_ambiguous:
+                        # Suppress legacy web-automation skills if a real API connector is active
+                        skill_name_lower = (matched.skill.name or "").lower()
+                        if any(w in skill_name_lower for w in ("email", "mail", "gmail")):
+                            from backend.connectors.credentials_store import credentials_store
+                            if credentials_store.get_credential("default", "gmail") or credentials_store.get_credential(str(uid), "gmail"):
+                                logger.info("[Planner] Suppressing legacy web-automation skill '%s' because Gmail API connector is connected.", matched.skill.name)
+                                matched = None
+
+                    if matched and not matched.is_ambiguous:
+                        import re
+                        # Extract any template parameter names referenced in the recipe steps
+                        referenced_params: set[str] = set()
+                        raw_steps = (matched.version.steps_json if matched.version else []) or []
+                        for step in raw_steps:
+                            for val in (step.get("title"), step.get("value_template"), step.get("value"), step.get("url")):
+                                if isinstance(val, str):
+                                    referenced_params.update(re.findall(r"\{\{([^}]+)\}\}", val))
+                            for ref in (step.get("parameter_references") or []):
+                                if ref:
+                                    referenced_params.add(str(ref))
+
+                        needed = [p for p in referenced_params if p not in matched.resolved_parameters or not matched.resolved_parameters[p]]
+                        if not needed and matched.missing_parameters:
+                            needed = list(matched.missing_parameters)
+
+                        # Intelligently compose/extract parameters using AI from the natural language prompt
+                        if needed:
+                            try:
+                                from backend.agent.skills.param_extractor import extractor
+                                prompt_text = goal or state.get("user_input", "")
+                                synthesized = await extractor.synthesize_parameters_with_ai(
+                                    user_prompt=prompt_text,
+                                    skill_name=matched.skill.name,
+                                    parameters_needed=needed,
+                                    active_target=state.get("active_target"),
+                                )
+                                if synthesized:
+                                    matched.resolved_parameters.update(synthesized)
+                                    matched.missing_parameters = [p for p in matched.missing_parameters if p not in synthesized]
+                                    logger.info("[Planner] Synthesized skill parameters with AI: %s", list(synthesized.keys()))
+                            except Exception as syn_err:
+                                logger.warning("[Planner] Parameter synthesis error: %s", syn_err)
+
+                        skill_steps = runtime.generate_plan_steps(matched)
+                        # Self-healing: if any step was blocked due to missing recorded selectors, reframe dynamically
+                        if skill_steps and any(s.get("id", "").startswith("skill-blocked") for s in skill_steps):
+                            try:
+                                from backend.agent.skills.reframer import reframe_skill_steps
+                                blocked_reason = skill_steps[0].get("description", "Skill recipe validation flagged missing selectors.")
+                                reframed = await reframe_skill_steps(
+                                    goal=goal or state.get("user_input", ""),
+                                    user_input=state.get("user_input", ""),
+                                    plan=skill_steps,
+                                    current_idx=0,
+                                    error_context=blocked_reason,
+                                    skill_name=matched.skill.name,
+                                    skill_id=str(matched.skill.id),
+                                    resolved_params=matched.resolved_parameters,
+                                )
+                                if reframed:
+                                    skill_steps = reframed
+                            except Exception as ref_err:
+                                logger.warning("[Planner] Pre-execution reframing skipped: %s", ref_err)
+
+                        if skill_steps:
+                            obs = state.get("observations", []).copy()
+                            confidence_pct = int(matched.confidence * 100)
+                            match_label = {
+                                "exact_trigger": "exact trigger",
+                                "semantic_similarity": "semantic match",
+                                "ai_intent": "AI intent match",
+                            }.get(matched.match_type, matched.match_type)
+                            if matched.missing_parameters:
+                                obs.append(
+                                    f"[Skill Replay] Matched '{matched.skill.name}' v{matched.version.version_number} "
+                                    f"via {match_label} ({confidence_pct}%). "
+                                    f"Collecting missing inputs: {', '.join(matched.missing_parameters)}."
+                                )
+                            else:
+                                obs.append(
+                                    f"[Skill Replay] Dispatching '{matched.skill.name}' v{matched.version.version_number} "
+                                    f"via {match_label} ({confidence_pct}%). LLM planner bypassed."
+                                )
+                            return {
+                                "plan": skill_steps,
+                                "current_step": 0,
+                                "observations": obs,
+                                "execution_status": "executing",
+                                "selected_model": "skill-replay-fastpath",
+                                "skill_id": str(matched.skill.id),
+                                "skill_version": matched.version.version_number,
+                                "is_replay_mode": True,
+                                "resolved_params": matched.resolved_parameters,
+                            }
+                    elif matched and matched.is_ambiguous and matched.competing_skills:
+                        competitors = matched.competing_skills
+                        clarify_step = {
+                            "id": f"skill-disambig-{uuid.uuid4().hex[:6]}",
+                            "title": "Clarify: Which skill did you mean?",
+                            "description": (
+                                f"Multiple saved skills match your request. "
+                                f"Please select which one to run: {' or '.join(repr(c) for c in competitors)}"
+                            ),
+                            "tool": "ask_user",
+                            "args": {
+                                "prompt": "I found multiple skills that match your request. Which one would you like to run?",
+                                "options": competitors,
+                                "placeholder": "Select a skill or type the name…",
+                                "parameter_name": "skill_choice",
+                            },
+                            "risk_level": RiskLevel.SAFE.value,
+                            "status": "pending",
+                            "result": None,
+                            "error": None,
+                        }
+                        obs = state.get("observations", []).copy()
+                        obs.append(
+                            f"[Skill Replay] Ambiguous match between {' and '.join(repr(c) for c in competitors)}. "
+                            "Asking user to clarify."
+                        )
+                        return {
+                            "plan": [clarify_step],
+                            "current_step": 0,
+                            "observations": obs,
+                            "execution_status": "executing",
+                            "selected_model": "skill-clarify-fastpath",
+                        }
+    except Exception as skill_err:
+        logger.warning("[Planner] Skill matching error: %s", skill_err, exc_info=True)
+
+    return None
+
+
 async def planner_node(state: NexusState) -> dict:
-    # 0. Fast-Path & Plan Cache Check: If plan is already formulated, return it with 0 LLM calls!
+    goal = state.get("goal") or state.get("user_input", "")
+    intent = state.get("intent", "general")
+    has_api_key = bool(get_groq_api_key() or get_gemma_api_key())
+
+    # 0. User Skill Priority (Highest Priority)
+    # If the user taught or recorded a skill that matches this goal or raw user_input, dispatch it directly!
+    # Learned skills always take priority over generic fastpaths, cached plans, and LLM planning.
+    matched_skill_plan = await _try_match_user_skill(state, goal)
+    if matched_skill_plan:
+        return matched_skill_plan
+
+    # 1. Fast-Path & Plan Cache Check: If plan is already formulated, return it with 0 LLM calls!
     existing_plan = state.get("plan")
     if existing_plan and len(existing_plan) > 0:
         return {
@@ -2200,10 +2374,6 @@ async def planner_node(state: NexusState) -> dict:
             "current_step": 0,
             "execution_status": "planning",
         }
-
-    goal = state.get("goal") or state.get("user_input", "")
-    intent = state.get("intent", "general")
-    has_api_key = bool(get_groq_api_key() or get_gemma_api_key())
 
     # ── Task Scheduling Fast-Path Match (Prioritized over immediate execution) ──
     try:
@@ -2273,160 +2443,7 @@ async def planner_node(state: NexusState) -> dict:
     except Exception as exc:
         logger.debug("Connector fastpath skipped: %s", exc)
 
-    # ── Learned Skill Fast-Path Match ────────────────────────────
-    try:
-        from backend.database.session import get_session_factory
-        session_factory = get_session_factory()
-        user_id_val = state.get("user_id")
-        if session_factory:
-            uid = None
-            if user_id_val:
-                try:
-                    uid = uuid.UUID(str(user_id_val)) if isinstance(user_id_val, str) else user_id_val
-                except Exception:
-                    uid = None
-            if not uid:
-                from backend.core.firebase_auth import LOCAL_USER_ID
-                uid = LOCAL_USER_ID
-
-            async with session_factory() as db_session:
-                if uid:
-                    from backend.agent.skills.matcher import matcher
-                    from backend.agent.skills.runtime import runtime
-                    matched = await matcher.match_skill(goal or state.get("user_input", ""), uid, db_session)
-                    if not matched and uid != LOCAL_USER_ID:
-                        matched = await matcher.match_skill(goal or state.get("user_input", ""), LOCAL_USER_ID, db_session)
-
-                    if matched and not matched.is_ambiguous:
-                        # Suppress legacy web-automation skills if a real API connector is active
-                        skill_name_lower = (matched.skill.name or "").lower()
-                        if any(w in skill_name_lower for w in ("email", "mail", "gmail")):
-                            from backend.connectors.credentials_store import credentials_store
-                            if credentials_store.get_credential("default", "gmail") or credentials_store.get_credential(str(uid), "gmail"):
-                                logger.info("[Planner] Suppressing legacy web-automation skill '%s' because Gmail API connector is connected.", matched.skill.name)
-                                matched = None
-
-                    if matched and not matched.is_ambiguous:
-                        import re
-                        # Extract any template parameter names referenced in the recipe steps
-                        referenced_params: set[str] = set()
-                        raw_steps = (matched.version.steps_json if matched.version else []) or []
-                        for step in raw_steps:
-                            for val in (step.get("title"), step.get("value_template"), step.get("value"), step.get("url")):
-                                if isinstance(val, str):
-                                    referenced_params.update(re.findall(r"\{\{([^}]+)\}\}", val))
-                            for ref in (step.get("parameter_references") or []):
-                                if ref:
-                                    referenced_params.add(str(ref))
-
-                        needed = [p for p in referenced_params if p not in matched.resolved_parameters or not matched.resolved_parameters[p]]
-                        if not needed and matched.missing_parameters:
-                            needed = list(matched.missing_parameters)
-
-                        # Intelligently compose/extract parameters using AI from the natural language prompt
-                        if needed:
-                            try:
-                                from backend.agent.skills.param_extractor import extractor
-                                prompt_text = goal or state.get("user_input", "")
-                                synthesized = await extractor.synthesize_parameters_with_ai(
-                                    user_prompt=prompt_text,
-                                    skill_name=matched.skill.name,
-                                    parameters_needed=needed,
-                                )
-                                if synthesized:
-                                    matched.resolved_parameters.update(synthesized)
-                                    matched.missing_parameters = [p for p in matched.missing_parameters if p not in synthesized]
-                                    logger.info("[Planner] Synthesized skill parameters with AI: %s", list(synthesized.keys()))
-                            except Exception as syn_err:
-                                logger.warning("[Planner] Parameter synthesis error: %s", syn_err)
-
-                        skill_steps = runtime.generate_plan_steps(matched)
-                        # Self-healing: if any step was blocked due to missing recorded selectors, reframe dynamically
-                        if skill_steps and any(s.get("id", "").startswith("skill-blocked") for s in skill_steps):
-                            try:
-                                from backend.agent.skills.reframer import reframe_skill_steps
-                                blocked_reason = skill_steps[0].get("description", "Skill recipe validation flagged missing selectors.")
-                                reframed = await reframe_skill_steps(
-                                    goal=goal or state.get("user_input", ""),
-                                    user_input=state.get("user_input", ""),
-                                    plan=skill_steps,
-                                    current_idx=0,
-                                    error_context=blocked_reason,
-                                    skill_name=matched.skill.name,
-                                    skill_id=str(matched.skill.id),
-                                    resolved_params=matched.resolved_parameters,
-                                )
-                                if reframed:
-                                    skill_steps = reframed
-                            except Exception as ref_err:
-                                logger.warning("[Planner] Pre-execution reframing skipped: %s", ref_err)
-
-                        if skill_steps:
-                            obs = state.get("observations", []).copy()
-                            confidence_pct = int(matched.confidence * 100)
-                            match_label = {
-                                "exact_trigger": "exact trigger",
-                                "semantic_similarity": "semantic match",
-                                "ai_intent": "AI intent match",
-                            }.get(matched.match_type, matched.match_type)
-                            if matched.missing_parameters:
-                                obs.append(
-                                    f"[Skill Replay] Matched '{matched.skill.name}' v{matched.version.version_number} "
-                                    f"via {match_label} ({confidence_pct}%). "
-                                    f"Collecting missing inputs: {', '.join(matched.missing_parameters)}."
-                                )
-                            else:
-                                obs.append(
-                                    f"[Skill Replay] Dispatching '{matched.skill.name}' v{matched.version.version_number} "
-                                    f"via {match_label} ({confidence_pct}%). LLM planner bypassed."
-                                )
-                            return {
-                                "plan": skill_steps,
-                                "current_step": 0,
-                                "observations": obs,
-                                "execution_status": "executing",
-                                "selected_model": "skill-replay-fastpath",
-                                "skill_id": str(matched.skill.id),
-                                "skill_version": matched.version.version_number,
-                                "is_replay_mode": True,
-                                "resolved_params": matched.resolved_parameters,
-                            }
-                    elif matched and matched.is_ambiguous and matched.competing_skills:
-                        # Two skills match with similar confidence - surface disambiguation to user
-                        competitors = matched.competing_skills
-                        clarify_step = {
-                            "id": f"skill-disambig-{uuid.uuid4().hex[:6]}",
-                            "title": "Clarify: Which skill did you mean?",
-                            "description": (
-                                f"Multiple saved skills match your request. "
-                                f"Please select which one to run: {' or '.join(repr(c) for c in competitors)}"
-                            ),
-                            "tool": "ask_user",
-                            "args": {
-                                "prompt": "I found multiple skills that match your request. Which one would you like to run?",
-                                "options": competitors,
-                                "placeholder": "Select a skill or type the name…",
-                                "parameter_name": "skill_choice",
-                            },
-                            "risk_level": RiskLevel.SAFE.value,
-                            "status": "pending",
-                            "result": None,
-                            "error": None,
-                        }
-                        obs = state.get("observations", []).copy()
-                        obs.append(
-                            f"[Skill Replay] Ambiguous match between {' and '.join(repr(c) for c in competitors)}. "
-                            "Asking user to clarify."
-                        )
-                        return {
-                            "plan": [clarify_step],
-                            "current_step": 0,
-                            "observations": obs,
-                            "execution_status": "executing",
-                            "selected_model": "skill-disambiguation",
-                        }
-    except Exception as exc:
-        logger.debug(f"[Planner] Learned skill matching exception: {exc}")
+    # Learned skills were already evaluated at the start of planner_node for absolute priority.
 
     # Read on_token from global registry (not from state — functions aren't msgpack serializable)
     try:

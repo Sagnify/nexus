@@ -3157,6 +3157,11 @@ async function typeText(payload) {
     }
 
     if (!el || el === document.body) {
+        // Fallback for search and general input fields when selector was loose or element not found
+        el = document.querySelector('input[type="search"], input[name*="search" i], input[placeholder*="search" i], input[aria-label*="search" i], input[type="text"], input:not([type]), textarea, [contenteditable="true"]');
+    }
+
+    if (!el || el === document.body) {
         throw new Error(`Element '${selector}' not found for typing.`);
     }
 

@@ -196,6 +196,8 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
     lower = clean.lower()
 
     # Substantive markers that require LLM planner / deep research / live data generation
+    # Unless explicitly requested as a template/boilerplate/skeleton
+    is_template = any(w in lower for w in ("template", "boilerplate", "sample", "blank", "skeleton"))
     substantive_markers = (
         "research", "study", "analysis", "deep", "in-depth", "investigate",
         "history", "industrialization", "market", "economy", "citations", "sources",
@@ -204,7 +206,7 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
         "budget", "expenses", "revenue", "sales", "financial", "quarterly",
         "formula", "chart", "graph", "compare", "comparison"
     )
-    if any(m in lower for m in substantive_markers):
+    if not is_template and any(m in lower for m in substantive_markers):
         return None, {}
 
     # Match Word Document boilerplate requests (e.g. "create a word document template", "make a blank docx report")
@@ -226,13 +228,15 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
 
     # Match Excel Spreadsheet boilerplate requests (e.g. "create an empty excel sheet", "create excel spreadsheet template")
     excel_match = re.search(
-        r"(?:create|generate|make)\s+(?:(?:a|an)\s+)?(?:excel\s+)?(?:spreadsheet|sheet|workbook|excel|xlsx|csv)(?:\s+(?:file|sheet|spreadsheet|workbook))?(?:\s+(?:template|boilerplate|skeleton|sample))?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
+        r"(?:create|generate|make)\s+(?:(?:a|an)\s+)?(?:excel\s+)?(?:spreadsheet|sheet|workbook|excel|xlsx|csv)(?:\s+(?:file|sheet|spreadsheet|workbook))?(?:\s+(?:template|boilerplate|skeleton|sample))?(?:\s+(?:for|on|about)\s+[\"']?([a-zA-Z0-9_\-\s]{2,25})[\"']?)?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
         lower,
     )
     if excel_match and any(w in lower for w in ("excel", "spreadsheet", "xlsx")):
         # Only use canonical template if the request is generic/template
-        custom_path = excel_match.group(1)
-        path = custom_path or "Desktop/data_template.xlsx"
+        topic = (excel_match.group(1) or "data").strip()
+        custom_path = excel_match.group(2)
+        safe_topic_slug = re.sub(r"[^\w\s-]", "", topic).strip().replace(" ", "_")[:30] or "data"
+        path = custom_path or f"Desktop/{safe_topic_slug}_template.xlsx"
         if not path.endswith(".xlsx"):
             path += ".xlsx"
         return "create_excel_sheet", {"path": path}

@@ -93,22 +93,23 @@ def extract_media_intent(goal: str) -> Optional[dict]:
 
     has_spotify = bool(re.search(r'\b(?:spotify|open\.spotify\.com)\b', lower)) or bool(re.search(r'\bform\s+spotify\b', lower))
     has_ytm = bool(re.search(r'\b(?:youtube\s+music|yt\s+music|ytm)\b', lower))
-    has_youtube = bool(re.search(r'\b(?:youtube|yt)\b', lower)) and not has_ytm
-    has_soundcloud = bool(re.search(r'\b(?:soundcloud|sc)\b', lower))
+    has_youtube = bool(re.search(r'\b(?:youtube|yt\s+(?:music|video))\b', lower)) and not has_ytm
+    has_soundcloud = bool(re.search(r'\b(?:soundcloud)\b', lower))
 
     # Pattern: YouTube Music
     if has_ytm:
         m = re.search(r'^(?:play|listen\s+to|stream)\s+(?:(?:some|the)\s+)?(.+?)\s+(?:on|from|in|via)\s+(?:youtube\s+music|yt\s+music|ytm)$', lower)
         q = m.group(1).strip() if m else ""
         if not q:
-            m2 = re.search(r'(?:youtube\s+music|yt\s+music|ytm)\s+(?:and\s+)?(?:play|search(?:\s+for)?)\s*(.*)', lower)
+            m2 = re.search(r'(?:youtube\s+music|yt\s+music|ytm)\s+(?:and\s+)?(?:play|search(?:\s+for)?)\s*(.+)', lower)
             q = m2.group(1).strip() if m2 else ""
-        return {
-            "type": "play",
-            "service": "youtube_music",
-            "query": q,
-            "prefer_desktop": False,
-        }
+        if q:
+            return {
+                "type": "play",
+                "service": "youtube_music",
+                "query": q,
+                "prefer_desktop": False,
+            }
 
     # Pattern: "open spotify and play <query>" or "launch spotify and play <query>"
     m = re.search(r'^(?:open|launch|start)\s+spotify(?:\s+(?:app|desktop|web))?\s+(?:and\s+)?(?:play|search(?:\s+for)?)\s*(.*)', lower)

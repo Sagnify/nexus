@@ -55,7 +55,7 @@ def test_fastpath_math_and_system():
 
 def test_plan_cache_word_template():
     """Verify normalized template retrieval for docx creation."""
-    cached_plan = get_cached_plan("create a word report on AI Agents")
+    cached_plan = get_cached_plan("create a word report template on AI Agents")
     assert cached_plan is not None
     assert len(cached_plan) >= 3
     tools = [s["tool"] for s in cached_plan]
@@ -66,7 +66,7 @@ def test_plan_cache_word_template():
 
 def test_plan_cache_excel_template():
     """Verify normalized template retrieval for excel sheet creation."""
-    cached_plan = get_cached_plan("create an excel spreadsheet for Budget 2026")
+    cached_plan = get_cached_plan("create an excel spreadsheet template for Budget 2026")
     assert cached_plan is not None
     assert len(cached_plan) >= 2
     tools = [s["tool"] for s in cached_plan]
@@ -76,7 +76,7 @@ def test_plan_cache_excel_template():
 
 def test_plan_cache_signature():
     """Verify runtime signature extraction."""
-    sig, params = extract_template_signature("create a word document on Quantum Computing")
+    sig, params = extract_template_signature("create a word document template on Quantum Computing")
     assert sig == "create_word_report"
     assert "Quantum" in params.get("topic", "")
 

@@ -423,20 +423,29 @@ async def evaluator_node(state: NexusState) -> dict:
         is_failed = False
         if is_media and plan[0].get("tool") == "play_music":
             try:
-                import re
-                from backend.agent.tools.system.media_tool import _get_smtc_media_info
-                smtc = _get_smtc_media_info()
-                target_q = plan[0].get("args", {}).get("query", "") or user_input
-                q_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", target_q) if len(w) > 2]
-                stop_words = {"song", "track", "music", "play", "from", "the", "and", "audio", "listen", "hits", "single"}
-                q_tokens = [w for w in q_words if w not in stop_words] or q_words
-                ttl = (smtc.get("title") or "").lower()
-                art = (smtc.get("artist") or "").lower()
-                alb = (smtc.get("album") or "").lower()
-                matches = any(tok in ttl or tok in art or tok in alb for tok in q_tokens) if q_tokens else True
-                if plan[0].get("status") == "failed" or (smtc.get("status") != "Playing") or not matches:
-                    if "Verified" not in str(res):
+                args = plan[0].get("args", {})
+                svc = (args.get("service") or "spotify").lower().strip()
+                prefer_desktop = args.get("prefer_desktop", True)
+                if svc == "spotify" and prefer_desktop:
+                    import re
+                    from backend.agent.tools.system.media_tool import _get_smtc_media_info
+                    smtc = _get_smtc_media_info()
+                    target_q = args.get("query", "") or user_input
+                    q_words = [w.lower() for w in re.findall(r"[A-Za-z0-9]+", target_q) if len(w) > 2]
+                    stop_words = {"song", "track", "music", "play", "from", "the", "and", "audio", "listen", "hits", "single"}
+                    q_tokens = [w for w in q_words if w not in stop_words] or q_words
+                    ttl = (smtc.get("title") or "").lower()
+                    art = (smtc.get("artist") or "").lower()
+                    alb = (smtc.get("album") or "").lower()
+                    matches = any(tok in ttl or tok in art or tok in alb for tok in q_tokens) if q_tokens else True
+                    if plan[0].get("status") == "failed":
                         is_failed = True
+                    elif smtc.get("status") == "Playing" and matches:
+                        is_failed = False
+                    elif "Verified" not in str(res) and plan[0].get("status") == "failed":
+                        is_failed = True
+                elif plan[0].get("status") == "failed":
+                    is_failed = True
             except Exception:
                 if plan[0].get("status") == "failed":
                     is_failed = True
