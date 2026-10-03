@@ -317,15 +317,22 @@ async def _react_decide(
         return {"action": "goal_achieved", "args": {"summary": "All plan steps exhausted."}, "reasoning": ""}
 
     # ── Deterministic Milestone Execution ────────────────────────────────────
-    # If the target milestone has concrete tool & args and the previous action did not fail on it,
+    # For non-browser, non-interactive deterministic tools (e.g. document, spreadsheet, system commands, media),
     # execute the planned milestone directly! This keeps execution fast, deterministic,
-    # perfectly in sync with the plan milestones, and completely immune to Groq TPM rate limits.
+    # and completely immune to Groq TPM rate limits.
+    # CRITICAL: Browser interaction tools (click, type, select, scroll, wait, inspect, etc.) or interactive web tasks
+    # MUST ALWAYS flow through the ReAct loop so the agent observes the live page DOM, handles obstructive
+    # popups/dialogs, resolves dynamic selectors, and adapts like an intelligent pair programmer.
     target_step = plan_guide[current_idx] if current_idx < len(plan_guide) else None
     target_tool = target_step.get("tool", "") if target_step else ""
     target_args = target_step.get("args", {}) if target_step else {}
     last_action_failed = bool(history and (not history[-1].get("success", True) or history[-1].get("validation_passed") is False))
 
-    if target_tool and target_args and not last_action_failed:
+    is_browser_interaction = (target_tool in BROWSER_TOOLS and target_tool != "browser_navigate")
+    is_interactive_task = is_web_task and target_tool in BROWSER_TOOLS and target_tool != "browser_navigate"
+    is_dialog_tool = target_tool in ("ask_user", "ai_response")
+
+    if target_tool and target_args and not last_action_failed and not is_browser_interaction and not is_interactive_task and not is_dialog_tool:
         milestone_title = target_step.get("title") or target_tool
         return {
             "action": target_tool,

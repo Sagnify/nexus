@@ -266,6 +266,14 @@ async def start_teach_session(
                         detail=f"Browser recording could not start: {exc}",
                     ) from exc
 
+    if session.target_environment in ("desktop", "mixed"):
+        try:
+            from backend.agent.skills.desktop_observer import desktop_observer
+            await desktop_observer.start_observing(session.session_id)
+            logger.info("[Teach] Desktop demonstration observer engaged for session %s", session.session_id)
+        except Exception as do_exc:
+            logger.warning("[Teach] Could not engage desktop observer: %s", do_exc)
+
     return {
         "session_id": session.session_id,
         "status": session.status,
@@ -410,6 +418,12 @@ async def stop_teach_session(
 
     raw_events = []
     try:
+        try:
+            from backend.agent.skills.desktop_observer import desktop_observer
+            await desktop_observer.stop_observing()
+        except Exception:
+            pass
+
         if extension_bridge.is_connected():
             try:
                 await extension_bridge.send_command("stop_teach_mode", {}, timeout=0.8)
@@ -583,6 +597,12 @@ async def discard_teach_session(
     session = await session_manager.get_active_session_for_user(user_id)
     if session:
         await session_manager.discard_session(session.session_id, user_id)
+
+    try:
+        from backend.agent.skills.desktop_observer import desktop_observer
+        await desktop_observer.stop_observing()
+    except Exception:
+        pass
 
     if extension_bridge.is_connected():
         try:

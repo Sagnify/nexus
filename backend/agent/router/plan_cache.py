@@ -49,9 +49,55 @@ CANONICAL_TEMPLATES: dict[str, CachedPlanTemplate] = {
             },
             {
                 "title": "Add Executive Summary",
-                "description": "Insert executive overview heading and analysis",
+                "description": "Insert executive overview heading",
                 "tool": "document_add_heading",
                 "args": {"text": "Executive Summary", "level": 1},
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Summary Content",
+                "description": "Insert executive overview body narrative",
+                "tool": "document_add_paragraph",
+                "args": {
+                    "text": "This report provides an executive summary and analysis regarding {{topic}}. It synthesizes core objectives, relevant context, and actionable findings for operational review."
+                },
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Detailed Analysis",
+                "description": "Insert detailed analysis heading",
+                "tool": "document_add_heading",
+                "args": {"text": "Detailed Analysis & Findings", "level": 2},
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Analysis Narrative",
+                "description": "Insert comprehensive narrative paragraph",
+                "tool": "document_add_paragraph",
+                "args": {
+                    "text": "A structured evaluation was conducted on {{topic}} to assess key drivers, performance indicators, and structural requirements. The following findings outline essential milestones and tactical considerations."
+                },
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Recommendations Section",
+                "description": "Insert actionable recommendations heading",
+                "tool": "document_add_heading",
+                "args": {"text": "Key Recommendations", "level": 2},
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Recommendation 1",
+                "description": "Insert first tactical bullet point",
+                "tool": "document_add_bullet",
+                "args": {"text": "Establish defined milestone tracking and validation checkpoints for {{topic}}."},
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Add Recommendation 2",
+                "description": "Insert second tactical bullet point",
+                "tool": "document_add_bullet",
+                "args": {"text": "Implement structured oversight and data-driven continuous improvement loops."},
                 "risk_level": "SAFE",
             },
             {
@@ -65,7 +111,7 @@ CANONICAL_TEMPLATES: dict[str, CachedPlanTemplate] = {
                 "title": "Verify Document Integrity",
                 "description": "Verify file existence and structure on disk",
                 "tool": "document_verify",
-                "args": {"path": "{{path}}"},
+                "args": {"path": "{{path}}", "min_paragraphs": 2},
                 "risk_level": "READ_ONLY",
             },
         ],
@@ -84,6 +130,37 @@ CANONICAL_TEMPLATES: dict[str, CachedPlanTemplate] = {
                 "risk_level": "SAFE",
             },
             {
+                "title": "Populate Table Structure",
+                "description": "Populate headers and structured rows",
+                "tool": "spreadsheet_write_range",
+                "args": {
+                    "start_cell": "A1",
+                    "sheet": "Data",
+                    "values": [
+                        ["ID", "Item / Description", "Category", "Status", "Target Period", "Metric Score"],
+                        [101, "Milestone Assessment", "Operations", "Completed", "Q1", 95],
+                        [102, "Workflow Implementation", "Engineering", "Active", "Q2", 120],
+                        [103, "Quality Verification", "QA", "Scheduled", "Q2", 85],
+                        [104, "Performance Review", "Management", "Pending", "Q3", 110],
+                    ],
+                },
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Format Header Row",
+                "description": "Apply professional header styling and bold fill",
+                "tool": "spreadsheet_format_range",
+                "args": {"range": "A1:F1", "sheet": "Data", "bold": True, "fill_color": "1F4E78", "color": "FFFFFF"},
+                "risk_level": "SAFE",
+            },
+            {
+                "title": "Create Formatted Table",
+                "description": "Convert range into Excel table",
+                "tool": "spreadsheet_create_table",
+                "args": {"range": "A1:F5", "name": "DataTable", "sheet": "Data"},
+                "risk_level": "SAFE",
+            },
+            {
                 "title": "Save Workbook to Disk",
                 "description": "Save generated Excel file to {{path}}",
                 "tool": "spreadsheet_save",
@@ -94,7 +171,7 @@ CANONICAL_TEMPLATES: dict[str, CachedPlanTemplate] = {
                 "title": "Verify Workbook Integrity",
                 "description": "Verify file existence and cell data",
                 "tool": "spreadsheet_verify",
-                "args": {"path": "{{path}}"},
+                "args": {"path": "{{path}}", "min_rows": 2},
                 "risk_level": "READ_ONLY",
             },
         ],
@@ -110,34 +187,52 @@ def extract_template_signature(query: str) -> tuple[Optional[str], dict[str, str
     """
     Analyzes user query to extract a normalized template signature and parameter mappings.
     Returns (signature, params).
+    
+    Substantive queries that require deep topic research, dynamic web scraping,
+    custom real-world rankings, or bespoke tabular data are explicitly NOT intercepted here;
+    they are allowed to flow directly to the LLM Planner / Deep Research Engine.
     """
     clean = query.strip()
     lower = clean.lower()
 
-    # Match Word Document Report queries
+    # Substantive markers that require LLM planner / deep research / live data generation
+    substantive_markers = (
+        "research", "study", "analysis", "deep", "in-depth", "investigate",
+        "history", "industrialization", "market", "economy", "citations", "sources",
+        "overview of", "summary of", "findings", "top 10", "top 5", "top ",
+        "best ", "chess", "players", "champions league", "scorers", "crypto",
+        "budget", "expenses", "revenue", "sales", "financial", "quarterly",
+        "formula", "chart", "graph", "compare", "comparison"
+    )
+    if any(m in lower for m in substantive_markers):
+        return None, {}
+
+    # Match Word Document boilerplate requests (e.g. "create a word document template", "make a blank docx report")
     word_match = re.search(
-        r"(?:create|generate|write|make)\s+(?:(?:a|an)\s+)?(?:word\s+)?(?:document|doc|docx|report)\s+(?:on|about|for)\s+[\"']?(.+?)[\"']?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
+        r"(?:create|generate|write|make)\s+(?:(?:a|an)\s+)?(?:word\s+)?(?:document|doc|docx|report)(?:\s+(?:template|boilerplate|skeleton))?(?:\s+(?:on|about|for)\s+[\"']?([a-zA-Z0-9_\-\s]{2,25})[\"']?)?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
         lower,
     )
     if word_match and not any(w in lower for w in ("powerpoint", "presentation", "excel", "spreadsheet")):
-        topic = word_match.group(1).strip()
-        custom_path = word_match.group(2)
-        safe_topic_slug = re.sub(r"[^\w\s-]", "", topic).strip().replace(" ", "_")[:30] or "report"
-        path = custom_path or f"Desktop/{safe_topic_slug}.docx"
-        if not path.endswith(".docx"):
-            path += ".docx"
-        return "create_word_report", {"topic": topic.capitalize(), "path": path}
+        # Only use canonical template if the request is generic or explicitly asks for a template
+        is_generic = not word_match.group(1) or any(w in lower for w in ("template", "boilerplate", "sample", "blank", "general"))
+        if is_generic:
+            topic = (word_match.group(1) or "General").strip()
+            custom_path = word_match.group(2)
+            safe_topic_slug = re.sub(r"[^\w\s-]", "", topic).strip().replace(" ", "_")[:30] or "report"
+            path = custom_path or f"Desktop/{safe_topic_slug}.docx"
+            if not path.endswith(".docx"):
+                path += ".docx"
+            return "create_word_report", {"topic": topic.capitalize(), "path": path}
 
-    # Match Excel Spreadsheet queries
+    # Match Excel Spreadsheet boilerplate requests (e.g. "create an empty excel sheet", "create excel spreadsheet template")
     excel_match = re.search(
-        r"(?:create|generate|make)\s+(?:(?:a|an)\s+)?(?:excel\s+)?(?:spreadsheet|sheet|workbook|excel|xlsx|csv)(?:\s+(?:file|sheet|spreadsheet|workbook))?(?:\s+(?:on|about|for)\s+[\"']?(.+?)[\"']?)?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
+        r"(?:create|generate|make)\s+(?:(?:a|an)\s+)?(?:excel\s+)?(?:spreadsheet|sheet|workbook|excel|xlsx|csv)(?:\s+(?:file|sheet|spreadsheet|workbook))?(?:\s+(?:template|boilerplate|skeleton|sample))?(?:\s+(?:named|called|at|to)\s+[\"']?([a-zA-Z0-9_\-\.\/]+)[\"']?)?$",
         lower,
     )
     if excel_match and any(w in lower for w in ("excel", "spreadsheet", "xlsx")):
-        topic = excel_match.group(1) or "Data"
-        custom_path = excel_match.group(2)
-        safe_slug = re.sub(r"[^\w\s-]", "", topic).strip().replace(" ", "_")[:30] or "data"
-        path = custom_path or f"Desktop/{safe_slug}.xlsx"
+        # Only use canonical template if the request is generic/template
+        custom_path = excel_match.group(1)
+        path = custom_path or "Desktop/data_template.xlsx"
         if not path.endswith(".xlsx"):
             path += ".xlsx"
         return "create_excel_sheet", {"path": path}

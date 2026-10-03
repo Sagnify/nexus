@@ -157,6 +157,8 @@ async def _build_active_connector_priority_plan(goal: str, user_id: str = "defau
     ]
 
     for connector_id, keywords, tool_names in connector_matches:
+        if connector_id == "filesystem" and any(w in lower for w in ("excel", "xlsx", "spreadsheet", "csv", "docx", "word doc", "word document", "powerpoint", "presentation", "slides", "ppt")):
+            continue
         if not any(keyword in lower for keyword in keywords):
             continue
 
@@ -2162,6 +2164,9 @@ async def planner_node(state: NexusState) -> dict:
                     uid = uuid.UUID(str(user_id_val)) if isinstance(user_id_val, str) else user_id_val
                 except Exception:
                     uid = None
+            if not uid:
+                from backend.core.firebase_auth import LOCAL_USER_ID
+                uid = LOCAL_USER_ID
 
             async with session_factory() as db_session:
                 if uid:
@@ -2533,6 +2538,12 @@ async def planner_node(state: NexusState) -> dict:
                 {"title": f"Add {second_field} Question", "description": "Add new question item", "tool": "browser_click", "args": {"selector": "div[aria-label*='Add question' i], button[aria-label*='Add question' i]", "text": "Add question"}},
                 {"title": f"Type {second_field} Question", "description": f"Set Question 2 to {second_field}", "tool": "browser_type", "args": {"selector": "div[role='listitem']:last-of-type [contenteditable='true']", "text": second_field}},
             ]
+        elif is_excel_creation_query or "excel" in lower_goal or "xlsx" in lower_goal or "spreadsheet" in lower_goal:
+            plan_data = await _build_dynamic_spreadsheet_plan(goal, has_api_key)
+        elif is_docx_creation_query or "docx" in lower_goal or "word doc" in lower_goal:
+            fast_docx = await _try_fast_path_plan(goal, "file_op", state_messages=state.get("messages"))
+            if fast_docx:
+                plan_data = _ensure_step_fields(fast_docx)
         elif is_file_creation_query:
             filename = "notes.txt"
             if "music" in lower_goal:

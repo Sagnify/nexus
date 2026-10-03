@@ -214,7 +214,26 @@ class SkillCompiler:
                 )
                 templated_val = f"{{{{{param_name}}}}}"
 
-        # 4. Match prompt keywords if user typed specific prompt query
+        # 4. Match numeric amounts / currency / quantities
+        if len(params) == 0 and field_context:
+            fc = field_context.lower()
+            if any(term in fc for term in ("amount", "price", "cost", "total", "budget", "quantity", "count", "number")):
+                num_match = re.search(r"\b\d+(?:\.\d+)?\b", value)
+                if num_match:
+                    matched_num = num_match.group(0)
+                    param_name = "amount" if any(t in fc for t in ("amount", "price", "cost", "total", "budget")) else "quantity"
+                    templated_val = templated_val.replace(matched_num, f"{{{{{param_name}}}}}")
+                    params.append(
+                        ParameterDefinition(
+                            name=param_name,
+                            type="number",
+                            description=f"Dynamic {param_name} value",
+                            required=True,
+                            default_value=None,
+                        )
+                    )
+
+        # 5. Match prompt keywords if user typed specific prompt query
         if prompt_intent and len(params) == 0:
             prompt_words = [w.strip() for w in prompt_intent.split() if len(w) > 3]
             for word in prompt_words:
@@ -223,11 +242,11 @@ class SkillCompiler:
                     templated_val = templated_val.replace(word, f"{{{{{param_name}}}}}")
                     params.append(
                         ParameterDefinition(
-                        name=param_name,
-                        type="string",
-                        description="Search term or query",
-                        required=True,
-                        default_value=None,
+                            name=param_name,
+                            type="string",
+                            description="Search term or query",
+                            required=True,
+                            default_value=None,
                         )
                     )
                     break
