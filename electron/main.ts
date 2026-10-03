@@ -102,21 +102,27 @@ function createSpotlightWindow() {
 
   // Hide on blur (click outside) ONLY for Spotlight window when no task is running
   mainWindow.on('blur', () => {
-    if (mainWindow && !mainWindow.webContents.isDevToolsOpened()) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDevToolsOpened()) {
       if (!isTaskRunning) {
         mainWindow.hide();
-        mainWindow.webContents.send('window-blurred');
-        mainWindow.webContents.send('window-hidden');
+        if (!mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('window-blurred');
+          mainWindow.webContents.send('window-hidden');
+        }
       }
     }
   });
 
   mainWindow.on('hide', () => {
-    mainWindow?.webContents.send('window-hidden');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window-hidden');
+    }
   });
 
   mainWindow.on('show', () => {
-    mainWindow?.webContents.send('window-shown');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window-shown');
+    }
   });
 
   mainWindow.once('ready-to-show', () => {
@@ -408,9 +414,11 @@ function showWindow() {
 }
 
 function hideWindow() {
-  if (!mainWindow) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.hide();
-  mainWindow.webContents.send('window-hidden');
+  if (!mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('window-hidden');
+  }
 }
 
 function toggleWindow() {
@@ -730,10 +738,14 @@ if (!gotTheLock) {
     }, 30_000);
 
     // IPC Handlers
-    ipcMain.on('window-hide', () => hideWindow());
-    ipcMain.on('window-show', () => showWindow());
+    ipcMain.on('window-hide', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) hideWindow();
+    });
+    ipcMain.on('window-show', () => {
+      if (!mainWindow || !mainWindow.isDestroyed()) showWindow();
+    });
     ipcMain.on('spotlight-wake', () => {
-      showWindow();
+      if (!mainWindow || !mainWindow.isDestroyed()) showWindow();
     });
 
     ipcMain.on('window-resize', (_event, { width, height, position }: { width?: number; height: number; position?: string }) => {
@@ -794,9 +806,9 @@ if (!gotTheLock) {
     });
 
     ipcMain.on('scheduled-email-brief-ready', (event) => {
-      if (!mainWindow || event.sender !== mainWindow.webContents) return;
+      if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return;
       mainRendererReady = true;
-      if (pendingEmailBriefTarget) {
+      if (pendingEmailBriefTarget && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('open-scheduled-email-brief', pendingEmailBriefTarget);
         pendingEmailBriefTarget = null;
       }
