@@ -94,29 +94,42 @@ DATE_PATTERNS = [
 EMAIL_PATTERN = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
 
 DISTILLATION_SYSTEM_PROMPT = """You are NEXUS Skill Distiller.
-Convert user-demonstrated actions into a clean, minimal, dynamic, reusable workflow.
-1. PURGE NOISE: Completely discard actions from unrelated background sites/apps (e.g. Google Meet, blank tabs, ad popups) and accidental misclicks. Keep only essential steps for the primary task.
+Convert user-demonstrated actions into a clean, minimal, dynamic, reusable workflow for ANY domain.
+1. PURGE NOISE: Completely discard actions from unrelated background sites/apps (e.g. Google Meet, lingering initial search/blank tabs, ad popups) and accidental misclicks. Keep only essential steps for the primary task.
 2. ROUTE REPAIR FROM EVIDENCE:
     - Consider the entire recorded sequence and workflow intent together, not one action in isolation.
     - Put an observed navigation before interactions that depend on that page, even if capture delivery reordered the events.
     - Prefer URLs and sites actually present in the recording. Never invent a route or claim an unobserved action succeeded.
     - When changing order, preserve each source action's original_step_index so its recorded selector bundle is restored.
-3. DYNAMIC INPUT GENERALIZATION:
-   - Generalize user-typed values with mustache templates: {{recipient_email}}, {{subject}}, {{body}}, {{search_query}}, {{target_date}}, {{amount}}, etc.
+3. DYNAMIC INPUT GENERALIZATION & SENSIBLE DEFAULTS:
+   - Identify dynamic fields demonstrated by the user across any workflow type:
+     * Forms / Surveys: {{form_title}}, {{question_1}}, {{question_2}}, {{question_title}}, etc.
+     * Email / Messaging: {{recipient_email}}, {{recipient_name}}, {{subject}}, {{body}}
+     * Search / Lookup: {{search_query}}
+     * Finance / E-commerce: {{amount}}, {{quantity}}, {{product_name}}
+     * Documents / Files: {{document_title}}, {{file_name}}, {{file_path}}
+     * Dates / Time: {{target_date}}, {{start_time}}
    - For every parameterized step, set "value_template" to "{{param}}" and "parameter_references": ["param"].
    - In "parameters_schema", declare each parameter: name, type ("string"|"email"|"date"|"number"|"filepath"), description, required (bool), default_value.
-4. PRESERVE SELECTORS: Include "original_step_index" (matching input "idx") for each step so DOM selectors are retained. Never synthesize a selector for an observed interaction.
-5. ZERO EMOJIS: Never use emojis in names, descriptions, or trigger phrases.
+   - ALWAYS populate "default_value" with the demonstrated text from the recording! Setting default_value allows the skill to be replayed instantly with the demonstrated defaults when invoked without arguments, while allowing dynamic overrides when arguments are provided.
+4. RICH NATURAL TRIGGER PHRASES:
+   - Generate at least 4-6 diverse, natural trigger variations:
+     * Base phrase from intent (e.g. "gform automate", "send email to team")
+     * Action verb variations (e.g. "automate google form", "create google form", "build form", "make form")
+     * Domain noun phrases (e.g. "google form automation", "survey automation")
+     * Parameterized phrases (e.g. "create google form for {{form_title}}", "send email to {{recipient_email}}")
+5. PRESERVE SELECTORS: Include "original_step_index" (matching input "idx") for each step so DOM selectors are retained. Never synthesize a selector for an observed interaction.
+6. ZERO EMOJIS: Never use emojis in names, descriptions, or trigger phrases.
 
 Respond ONLY with valid JSON:
 {
   "name": "Skill Name",
   "description": "Clear explanation of what the skill does",
-  "category": "communication" | "browser" | "productivity" | "general",
+  "category": "communication" | "browser" | "productivity" | "forms" | "general",
   "target_sites": ["domain.com"],
-  "trigger_phrases": ["action phrase", "action phrase to {{recipient_email}}"],
+  "trigger_phrases": ["action phrase", "synonym phrase", "parameterized phrase for {{param}}"],
   "parameters_schema": [
-    {"name": "recipient_email", "type": "email", "description": "Recipient email", "required": true, "default_value": "..."}
+    {"name": "form_title", "type": "string", "description": "Form title", "required": false, "default_value": "..."}
   ],
   "steps": [
     {"original_step_index": 0, "title": "Navigate to...", "action_type": "browser_navigate", "execution_engine": "browser", "url": "https://...", "value_template": null, "parameter_references": []},
@@ -175,8 +188,8 @@ class SkillCompiler:
                         name=param_name,
                         type="date",
                         description="Date to use for this workflow",
-                        required=True,
-                        default_value=None,
+                        required=False,
+                        default_value=matched_str,
                     )
                 )
                 break
@@ -192,35 +205,84 @@ class SkillCompiler:
                     name=param_name,
                     type="email",
                     description="Target email address",
-                    required=True,
-                    default_value=None,
+                    required=False,
+                    default_value=matched_email,
                 )
             )
 
         # 3. Match field semantic context if field is known
         if field_context and len(params) == 0:
             fc = field_context.lower()
-            if "subject" in fc:
+            intent_low = (prompt_intent or "").lower()
+            if any(term in fc for term in ("form title", "untitled form")) or ("title" in fc and "form" in intent_low):
+                param_name = "form_title"
+                params.append(
+                    ParameterDefinition(
+                        name=param_name,
+                        type="string",
+                        description="Form or document title",
+                        required=False,
+                        default_value=value,
+                    )
+                )
+                templated_val = f"{{{{{param_name}}}}}"
+            elif any(term in fc for term in ("question", "question title", "untitled question", "item title")):
+                param_name = "question_title"
+                params.append(
+                    ParameterDefinition(
+                        name=param_name,
+                        type="string",
+                        description="Question prompt or title",
+                        required=False,
+                        default_value=value,
+                    )
+                )
+                templated_val = f"{{{{{param_name}}}}}"
+            elif "subject" in fc:
                 param_name = "subject"
                 params.append(
                     ParameterDefinition(
                         name=param_name,
                         type="string",
                         description="Email subject line",
-                        required=True,
-                        default_value=None,
+                        required=False,
+                        default_value=value,
                     )
                 )
                 templated_val = f"{{{{{param_name}}}}}"
-            elif "body" in fc or "message" in fc or (not fc and len(value.split()) > 4):
+            elif any(term in fc for term in ("body", "message")) or (not fc and len(value.split()) > 4):
                 param_name = "body"
                 params.append(
                     ParameterDefinition(
                         name=param_name,
                         type="string",
                         description="Message body text",
-                        required=True,
-                        default_value=None,
+                        required=False,
+                        default_value=value,
+                    )
+                )
+                templated_val = f"{{{{{param_name}}}}}"
+            elif any(term in fc for term in ("description", "desc", "form description")):
+                param_name = "form_description"
+                params.append(
+                    ParameterDefinition(
+                        name=param_name,
+                        type="string",
+                        description="Description or note text",
+                        required=False,
+                        default_value=value,
+                    )
+                )
+                templated_val = f"{{{{{param_name}}}}}"
+            elif any(term in fc for term in ("name", "username", "recipient", "contact")) and not any(term in fc for term in ("card", "number")):
+                param_name = "recipient_name"
+                params.append(
+                    ParameterDefinition(
+                        name=param_name,
+                        type="string",
+                        description="Name of recipient or user",
+                        required=False,
+                        default_value=value,
                     )
                 )
                 templated_val = f"{{{{{param_name}}}}}"
@@ -239,8 +301,8 @@ class SkillCompiler:
                             name=param_name,
                             type="number",
                             description=f"Dynamic {param_name} value",
-                            required=True,
-                            default_value=None,
+                            required=False,
+                            default_value=matched_num,
                         )
                     )
 
@@ -256,8 +318,8 @@ class SkillCompiler:
                             name=param_name,
                             type="string",
                             description="Search term or query",
-                            required=True,
-                            default_value=None,
+                            required=False,
+                            default_value=value,
                         )
                     )
                     break
@@ -456,8 +518,9 @@ class SkillCompiler:
 
         # Generate trigger phrases (ZERO EMOJIS, no noise site phrases)
         triggers = []
-        if prompt_intent:
-            cleaned = prompt_intent.strip().lower()
+        name_or_intent = prompt_intent or skill_name or ""
+        if name_or_intent:
+            cleaned = name_or_intent.strip().lower()
             # Remove any emojis
             cleaned = re.sub(r"[^\x00-\x7F]+", "", cleaned).strip()
             if cleaned:
@@ -466,11 +529,29 @@ class SkillCompiler:
                 if no_punct and no_punct != cleaned and no_punct not in triggers:
                     triggers.append(no_punct)
 
+                # Add natural action variations (e.g. automate X -> create X, make X, run X)
+                action_prefixes = ["automate ", "create ", "make ", "build ", "generate ", "run "]
+                curr_base = cleaned
+                for pfx in action_prefixes:
+                    if curr_base.startswith(pfx):
+                        curr_base = curr_base[len(pfx):].strip()
+                        break
+                
+                if curr_base:
+                    for alt_verb in ["automate", "create", "make", "run"]:
+                        variant = f"{alt_verb} {curr_base}"
+                        if variant not in triggers and len(triggers) < 8:
+                            triggers.append(variant)
+
                 # Add parameterized variations if parameters exist
+                if "form_title" in all_params:
+                    triggers.append(f"{cleaned} titled {{{{form_title}}}}")
                 if "recipient_email" in all_params:
                     triggers.append(f"{cleaned} to {{{{recipient_email}}}}")
                 if "search_query" in all_params:
                     triggers.append(f"{cleaned} for {{{{search_query}}}}")
+                if "amount" in all_params:
+                    triggers.append(f"{cleaned} for {{{{amount}}}}")
 
                 if primary_site and "meet" not in primary_site:
                     site_label = primary_site.split(".")[0]
@@ -569,7 +650,7 @@ class SkillCompiler:
                 prompt_intent or skill_name or "Workflow",
             )
 
-            # Hard ceiling: 6s total for AI distillation (2 attempts × 3s each in model_router)
+            # Generous budget for full multi-step workflow JSON synthesis
             res = await asyncio.wait_for(
                 ainvoke_with_dynamic_switch(
                     [
@@ -579,10 +660,10 @@ class SkillCompiler:
                     operation="fast",
                     temperature=0.1,
                     max_attempts=2,
-                    per_attempt_timeout=3.5,
-                    max_tokens=600,
+                    per_attempt_timeout=6.0,
+                    max_tokens=3000,
                 ),
-                timeout=7.0,
+                timeout=14.0,
             )
 
             content = res.content if hasattr(res, "content") else str(res)
@@ -672,13 +753,17 @@ class SkillCompiler:
                     p_type = p.get("type", "string")
                     if p_type not in ("string", "date", "number", "filepath", "email"):
                         p_type = "string"
+                    default_val = p.get("default_value")
+                    is_req = p.get("required", False)
+                    if default_val is not None and str(default_val).strip() != "":
+                        is_req = False
                     params_schema.append(
                         ParameterDefinition(
                             name=p_name,
                             type=p_type,
                             description=p.get("description", f"Parameter {p_name}"),
-                            required=p.get("required", True),
-                            default_value=None if p.get("required", True) else p.get("default_value"),
+                            required=is_req,
+                            default_value=default_val,
                         )
                     )
 

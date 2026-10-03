@@ -442,9 +442,61 @@ class TestSkillsPipeline(unittest.IsolatedAsyncioTestCase):
         param_names = [p.name for p in draft.parameters_schema]
         self.assertNotIn("search_query", param_names)
 
-        # 3. Triggers must not demand {{search_query}}
+        # 3. form_title must be induced with demonstrated default value and required=False
+        self.assertIn("form_title", param_names)
+        form_param = next(p for p in draft.parameters_schema if p.name == "form_title")
+        self.assertEqual(form_param.default_value, "Automated Feedback Survey")
+        self.assertFalse(form_param.required)
+
+        # 4. Triggers must include action variants and not demand {{search_query}}
         for trig in draft.trigger_phrases:
             self.assertNotIn("search_query", trig)
+        self.assertTrue(any("create gform automate" in t or "run gform automate" in t for t in draft.trigger_phrases))
+
+    def test_compiler_multi_domain_parameter_induction(self):
+        """Compiler induces domain fields (questions, recipients, amounts) with demonstrated defaults."""
+        from backend.agent.skills.semanticizer import RawSemanticAction
+
+        raw_actions = [
+            RawSemanticAction(
+                action_type="browser_type",
+                execution_engine="browser",
+                title="Type question",
+                selector_bundle={"ariaLabel": "Question title"},
+                value="What is your department?",
+            ),
+            RawSemanticAction(
+                action_type="browser_type",
+                execution_engine="browser",
+                title="Type recipient",
+                selector_bundle={"name": "recipient_name"},
+                value="John Doe",
+            ),
+            RawSemanticAction(
+                action_type="browser_type",
+                execution_engine="browser",
+                title="Enter price",
+                selector_bundle={"name": "total_amount"},
+                value="250",
+            ),
+        ]
+
+        draft = self.compiler.compile(
+            raw_actions=raw_actions,
+            prompt_intent="create feedback",
+            skill_name="Create Feedback",
+        )
+
+        params_by_name = {p.name: p for p in draft.parameters_schema}
+        self.assertIn("question_title", params_by_name)
+        self.assertEqual(params_by_name["question_title"].default_value, "What is your department?")
+        self.assertFalse(params_by_name["question_title"].required)
+
+        self.assertIn("recipient_name", params_by_name)
+        self.assertEqual(params_by_name["recipient_name"].default_value, "John Doe")
+
+        self.assertIn("amount", params_by_name)
+        self.assertEqual(params_by_name["amount"].default_value, "250")
 
 
 if __name__ == "__main__":
