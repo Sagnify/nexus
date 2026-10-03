@@ -807,8 +807,14 @@ class SkillCompiler:
                         p_type = "string"
                     default_val = p.get("default_value")
                     is_req = p.get("required", False)
-                    if default_val is not None and str(default_val).strip() != "":
+                    is_key_param = p_name.lower() in (
+                        "form_title", "survey_title", "title", "fields", "form_fields",
+                        "questions", "question_1", "recipient_email", "to_email", "subject"
+                    )
+                    if default_val is not None and str(default_val).strip() != "" and not is_key_param:
                         is_req = False
+                    elif is_key_param:
+                        is_req = True
                     params_schema.append(
                         ParameterDefinition(
                             name=p_name,

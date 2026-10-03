@@ -734,6 +734,14 @@ if (!gotTheLock) {
       );
       if (pillWindow && !pillWindow.isDestroyed()) {
         pillWindow.webContents.send('task-state-updated', state);
+        if (state?.userInputRequest) {
+          if (!pillWindow.isVisible()) {
+            showPillWindow();
+          }
+          pillWindow.show();
+          pillWindow.moveTop();
+          pillWindow.focus();
+        }
       }
     });
 

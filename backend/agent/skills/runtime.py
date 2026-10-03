@@ -167,62 +167,95 @@ class SkillRuntime:
 
         # Build schema map for context-aware follow-up prompts
         schema_map: dict[str, dict] = {}
+        is_form_skill = any(w in (match.skill.name or "").lower() for w in ("form", "survey", "questionnaire", "quiz", "gform"))
         for p in (match.skill.parameters_schema or []):
             if isinstance(p, dict):
-                schema_map[p.get("name", "").lower()] = p
+                p_name_lower = p.get("name", "").strip().lower()
+                schema_map[p_name_lower] = p
+                is_req = p.get("required", False)
+                is_key_param = p_name_lower in ("form_title", "survey_title", "title", "fields", "form_fields", "questions", "question_1", "recipient_email", "to_email")
+                if p_name_lower and p_name_lower not in params and p_name_lower not in missing:
+                    if is_req or (is_form_skill and is_key_param):
+                        missing.append(p_name_lower)
             elif hasattr(p, "name"):
-                schema_map[p.name.lower()] = {
+                p_name_lower = p.name.strip().lower()
+                schema_map[p_name_lower] = {
                     "name": p.name,
                     "type": getattr(p, "type", "string"),
                     "description": getattr(p, "description", ""),
                     "required": getattr(p, "required", True),
+                    "default_value": getattr(p, "default_value", None),
                 }
+                is_req = getattr(p, "required", False)
+                is_key_param = p_name_lower in ("form_title", "survey_title", "title", "fields", "form_fields", "questions", "question_1", "recipient_email", "to_email")
+                if p_name_lower and p_name_lower not in params and p_name_lower not in missing:
+                    if is_req or (is_form_skill and is_key_param):
+                        missing.append(p_name_lower)
 
         # --- 1. Parameter collection steps for missing required values ---
         for p_name in missing:
             p_info = schema_map.get(p_name.lower(), {})
             p_desc = p_info.get("description") or p_name.replace("_", " ")
             p_type = p_info.get("type", "string")
+            opts: list[str] = []
 
             if p_name in ("recipient_email", "to_email", "email"):
                 prompt_q = "Who would you like to send this email to?"
                 placeholder_txt = "e.g. colleague@example.com"
+                opts = ["colleague@example.com", "team@example.com"]
             elif p_name in ("subject", "email_subject"):
                 prompt_q = "What should the subject be?"
                 placeholder_txt = "e.g. Project Status Update"
+                opts = ["Project Status Update", "Meeting Notes & Next Steps", "Quick Question"]
             elif p_name in ("form_title", "survey_title", "title"):
                 prompt_q = "What title would you like for this form?"
                 placeholder_txt = "e.g. Customer Feedback Survey"
+                opts = ["Customer Feedback Survey", "Event Registration", "Contact Information", "Team Feedback Form"]
             elif p_name in ("question_1", "first_question", "question", "question_title"):
                 prompt_q = "What question would you like to add?"
                 placeholder_txt = "e.g. How satisfied are you with our service?"
+                opts = ["Full Name", "Email Address", "How satisfied are you with our service?"]
             elif p_name in ("question_2", "second_question"):
                 prompt_q = "What is the second question you would like to add?"
                 placeholder_txt = "e.g. Any additional comments or feedback?"
+                opts = ["Phone Number", "Any additional comments or feedback?", "Rate our service (1-5)"]
             elif p_name in ("question_3", "third_question"):
                 prompt_q = "What is the next question?"
                 placeholder_txt = "e.g. Your contact email"
+                opts = ["Comments / Suggestions", "Preferred Contact Method"]
             elif p_name in ("fields", "form_fields", "questions"):
                 prompt_q = "What questions or fields would you like on this form?"
                 placeholder_txt = "e.g. Name, Email, Feedback"
+                opts = ["Name, Email, Feedback", "Name, Phone Number, Comments", "Event RSVP: Name, Email, Attendance"]
             elif p_name in ("body", "message", "content", "email_body"):
                 prompt_q = "What message would you like to send?"
                 placeholder_txt = "e.g. Hi team, here’s the update…"
+                opts = ["Hi team, here is the latest update.", "Quick follow up regarding our discussion.", "Please find the attached details."]
             elif p_name in ("search_query", "query", "search_term"):
                 prompt_q = "What would you like to search for?"
                 placeholder_txt = "Type search terms\u2026"
+                opts = []
             elif p_name in ("target_date", "date", "month", "billing_month"):
                 prompt_q = "What date should this workflow use?"
                 placeholder_txt = "e.g. March 2026 or 2026-03-28"
+                opts = ["Today", "Tomorrow", "End of this week"]
             elif p_type == "filepath":
                 prompt_q = f"Please specify the file path for: {p_desc}"
                 placeholder_txt = r"e.g. C:\Users\you\Documents\file.xlsx"
+                opts = ["Desktop", "Documents", "Downloads", "Browse..."]
             elif p_type == "number":
                 prompt_q = f"Please enter the {p_desc}:"
                 placeholder_txt = "e.g. 42"
+                opts = ["1", "5", "10", "100"]
             else:
                 prompt_q = f"Please enter the {p_name.replace('_', ' ')}:"
                 placeholder_txt = f"e.g. {p_desc}"
+                opts = []
+
+            # Include demonstrated default value as first clickable chip option if present
+            def_opt = str(p_info.get("default_value") or "").strip()
+            if def_opt and def_opt not in opts and not def_opt.startswith("{{"):
+                opts.insert(0, def_opt)
 
             steps.append({
                 "id": f"skill-input-{p_name}-{uuid.uuid4().hex[:4]}",
@@ -231,6 +264,7 @@ class SkillRuntime:
                 "tool": "ask_user",
                 "args": {
                     "prompt": prompt_q,
+                    "options": opts,
                     "placeholder": placeholder_txt,
                     "parameter_name": p_name,
                     "parameter_type": p_type,

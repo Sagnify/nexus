@@ -317,7 +317,18 @@ async def _react_decide(
         if current_idx < len(plan_guide):
             s = plan_guide[current_idx]
             return {"action": s.get("tool", "ai_response"), "args": s.get("args", {}), "reasoning": "No API key — using plan step directly"}
-        return {"action": "goal_achieved", "args": {"summary": "All plan steps exhausted."}, "reasoning": ""}
+    # ── Immediate ask_user milestone execution (0 LLM latency / zero rate limit) ──
+    target_step = plan_guide[current_idx] if current_idx < len(plan_guide) else None
+    if target_step and target_step.get("tool") == "ask_user":
+        target_args = target_step.get("args", {}) or {}
+        milestone_title = target_step.get("title") or "Required User Input"
+        logger.info("[Executor] Milestone is 'ask_user': prompting user directly without LLM ReAct delay.")
+        return {
+            "action": "ask_user",
+            "args": target_args,
+            "reasoning": f"Prompting user: {target_args.get('prompt') or milestone_title}",
+            "step_completed": False,
+        }
 
     # ── Universal popup/modal dismissal check across ANY website ─────────────
     # Must run before both deterministic replay and LLM ReAct so popups don't block actions!
@@ -517,7 +528,7 @@ def _is_terminal_connector_auth_error(action: str, output: str) -> bool:
     return bool(re.search(r"\b(?:401|403)\b|unauthorized|forbidden", message))
 
 
-async def _execute_single_action(action: str, args: dict) -> tuple[bool, str]:
+async def _execute_single_action(action: str, args: dict, task_id: Optional[str] = None) -> tuple[bool, str]:
     """Execute a single tool and return (success, result_text)."""
     if action == "ai_response":
         explicit_answer = args.get("answer")
@@ -544,8 +555,10 @@ async def _execute_single_action(action: str, args: dict) -> tuple[bool, str]:
         try:
             from backend.api.nexus import request_user_input, _task_queues
             from backend.core.file_dialog import open_native_save_dialog
-            active_ids = list(_task_queues.keys())
-            tid = active_ids[-1] if active_ids else "active_task"
+            tid = task_id or args.get("task_id")
+            if not tid:
+                active_ids = list(_task_queues.keys())
+                tid = active_ids[-1] if active_ids else "active_task"
             user_val = await request_user_input(tid, prompt=prompt, options=options, placeholder=placeholder)
 
             if user_val:
@@ -818,7 +831,7 @@ async def executor_node(state: NexusState) -> dict:
 
             tool_results.append({"step_id": step["id"], "tool": tool_name, "output": answer, "success": step["status"] == "completed"})
         else:
-            success, output = await _execute_single_action(tool_name, args)
+            success, output = await _execute_single_action(tool_name, args, task_id=state.get("task_id"))
             terminal_connector_auth_error = _is_terminal_connector_auth_error(tool_name, output) if not success else False
             if not success:
                 reframing_count = state.get("reframing_count", 0)
@@ -919,9 +932,16 @@ async def executor_node(state: NexusState) -> dict:
         if last.get("action") in ("browser_click", "browser_navigate", "browser_press"):
             await asyncio.sleep(0.4)
 
-    dom_before = await _get_live_page_state()
-    dom = dom_before  # alias for readability
-    current_url = dom.get("url", "")
+    target_step = plan[current_idx] if current_idx < len(plan) else None
+    is_input_step = bool(target_step and target_step.get("tool") == "ask_user")
+    if is_input_step:
+        dom_before = {}
+        dom = {}
+        current_url = ""
+    else:
+        dom_before = await _get_live_page_state()
+        dom = dom_before  # alias for readability
+        current_url = dom.get("url", "")
 
     initial_dom = state.get("initial_dom")
     if not initial_dom and is_web_task:
@@ -1247,7 +1267,7 @@ async def executor_node(state: NexusState) -> dict:
     # Capture DOM state BEFORE action (for validation diff)
     # dom_before is already captured above as part of OBSERVE
 
-    success, result = await _execute_single_action(action, args)
+    success, result = await _execute_single_action(action, args, task_id=state.get("task_id"))
 
     if action == "ask_user" and success and args.get("parameter_name"):
         _propagate_user_param_input(args["parameter_name"], result, plan, state)

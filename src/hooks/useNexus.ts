@@ -451,8 +451,9 @@ const isDateTimeQuery = (input: string): boolean => {
     }
   };
 
-  const submitUserInput = async (value: string) => {
+  const submitUserInput = async (value: string, explicitTaskId?: string) => {
     const req = taskState.userInputRequest;
+    const tid = explicitTaskId || req?.taskId || taskState.taskId;
     try {
       setTaskState(prev => ({
         ...prev,
@@ -462,7 +463,7 @@ const isDateTimeQuery = (input: string): boolean => {
       await fetch(`${BACKEND_URL}/api/nexus/input`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value, task_id: req?.taskId || taskState.taskId }),
+        body: JSON.stringify({ value, task_id: tid }),
       });
     } catch (err: any) {
       console.warn('Error submitting user input:', err);

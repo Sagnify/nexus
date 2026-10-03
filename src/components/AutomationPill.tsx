@@ -163,6 +163,17 @@ export const AutomationPill: React.FC<AutomationPillProps> = ({
   const [isExpanded, setIsExpanded] = useState(false);
   const [showErrorDrawer, setShowErrorDrawer] = useState(false);
   const [customInputText, setCustomInputText] = useState('');
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  // Auto-focus input field and clear draft when an input request arrives
+  React.useEffect(() => {
+    if (userInputRequest) {
+      setCustomInputText('');
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 60);
+    }
+  }, [userInputRequest]);
 
   // Accumulate and deduplicate all issues across runtime, steps, and errors
   const allIssues: IssueItem[] = React.useMemo(() => {
@@ -463,6 +474,7 @@ export const AutomationPill: React.FC<AutomationPillProps> = ({
               className="nexus-input-form"
             >
               <input
+                ref={inputRef}
                 type="text"
                 value={customInputText}
                 onChange={e => setCustomInputText(e.target.value)}

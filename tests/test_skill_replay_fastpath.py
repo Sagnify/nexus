@@ -120,3 +120,43 @@ async def test_react_decide_intrusive_popup_interception():
     )
     assert d["action"] == "browser_dismiss_popups"
     assert d.get("is_auxiliary") is True
+
+
+@pytest.mark.asyncio
+async def test_react_decide_ask_user_milestone_fastpath():
+    """Verify that ask_user milestone executes directly without calling Groq LLM or triggering 429 errors."""
+    plan = [
+        {
+            "id": "skill-input-form_title-1234",
+            "title": "Required: Form Title",
+            "tool": "ask_user",
+            "args": {
+                "prompt": "What title would you like for this form?",
+                "options": ["Customer Feedback", "Registration Form"],
+                "parameter_name": "form_title",
+            },
+            "status": "pending",
+        },
+        {
+            "id": "skill-step-2",
+            "title": "Navigate to form",
+            "tool": "browser_navigate",
+            "args": {"url": "https://forms.new"},
+            "status": "pending",
+        }
+    ]
+
+    d = await _react_decide(
+        goal="Automate Google form creation",
+        dom={},
+        history=[],
+        plan_guide=plan,
+        is_web_task=True,
+        current_idx=0,
+        is_replay_mode=True,
+    )
+
+    assert d["action"] == "ask_user"
+    assert d["args"]["parameter_name"] == "form_title"
+    assert d["args"]["options"] == ["Customer Feedback", "Registration Form"]
+    assert "Prompting user:" in d["reasoning"]

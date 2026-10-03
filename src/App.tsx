@@ -211,7 +211,7 @@ export const App: React.FC = () => {
       else if (action === 'reset') resetTask();
       else if (action === 'approve') respondPermission(true);
       else if (action === 'reject') respondPermission(false);
-      else if (action === 'submit_input') submitUserInput(payload?.value || '');
+      else if (action === 'submit_input') submitUserInput(payload?.value || '', payload?.taskId);
       else if (action === 'teach_finish') {
         window.electronAPI?.hideAutomationPill();
         window.electronAPI?.showWindow();
@@ -262,7 +262,7 @@ export const App: React.FC = () => {
       activeTaskState.isPaused ||
       Boolean(activeTaskState.pendingPermission) ||
       Boolean(activeTaskState.userInputRequest)) &&
-    (activeTaskState.plan.length === 0 ? teachMode.isTeaching : requiresUiAutomation);
+    (teachMode.isTeaching || requiresUiAutomation);
 
   const shouldShowPill = teachMode.isTeaching || isAutomationPlaying;
 
@@ -710,8 +710,9 @@ export const App: React.FC = () => {
           }}
           userInputRequest={activeTaskState.userInputRequest}
           onSubmitUserInput={(val) => {
-            submitUserInput(val);
-            window.electronAPI?.sendPillAction('submit_input', { value: val });
+            const tid = activeTaskState.userInputRequest?.taskId || activeTaskState.taskId || undefined;
+            submitUserInput(val, tid);
+            window.electronAPI?.sendPillAction('submit_input', { value: val, taskId: tid });
           }}
           onAutoDismiss={() => {
             pillVisibilityRef.current = 'hidden';
