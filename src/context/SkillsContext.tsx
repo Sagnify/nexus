@@ -121,7 +121,9 @@ export const SkillsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const isTeachingRef = useRef<boolean>(isTeaching);
   isTeachingRef.current = isTeaching;
 
-  const isPillWindow = new URLSearchParams(window.location.search).get('view') === 'pill';
+  const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+  const hashParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.hash.replace(/^#\/?/, '')) : null;
+  const isPillWindow = urlParams?.get('view') === 'pill' || hashParams?.get('view') === 'pill';
 
   const requestGenerationRef = useRef(0);
   const lastAuthHeaderRef = useRef<{ scope: string; token: string; expiresAt: number }>({ scope: '', token: '', expiresAt: 0 });
@@ -557,6 +559,7 @@ export const SkillsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         body: JSON.stringify({
           prompt: intentPrompt,
           target_environment: targetEnv,
+          allow_desktop_fallback: true,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -565,13 +568,15 @@ export const SkillsProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
 
       const extConnected = Boolean(data.extension_connected);
+      const actualEnv = data.target_environment || targetEnv;
       setTeachSessionId(data.session_id);
       setExtensionConnected(extConnected);
+      setTeachEnvironment(actualEnv);
       setIsTeaching(true);
 
       const initSession = {
         isTeaching: true,
-        teachEnvironment: targetEnv,
+        teachEnvironment: actualEnv,
         teachPrompt: intentPrompt,
         teachTimer: 0,
         eventsCount: 0,

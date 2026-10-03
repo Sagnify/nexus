@@ -477,11 +477,14 @@ export const App: React.FC = () => {
       lower.startsWith('learn ')
     ) {
       const isDesktop = lower.includes('desktop') || lower.includes('app') || lower.includes('windows') || lower.includes('native');
-      const isBrowser = lower.includes('browser') || lower.includes('web') || lower.includes('chrome') || !isDesktop;
+      const isBrowser = lower.includes('browser') || lower.includes('web') || lower.includes('chrome');
+      const targetEnv = isBrowser ? 'browser' : isDesktop ? 'desktop' : 'mixed';
       const promptIntent = text
         .replace(/^(record\s+(browser\s+|desktop\s+|workflow\s+|automation\s+)?|teach\s+(nexus\s+|skill\s+)?|learn\s+skill\s+)/i, '')
         .trim();
-      teachMode.startTeach(promptIntent || 'Workflow Demonstration', isBrowser ? 'browser' : 'desktop');
+      teachMode.startTeach(promptIntent || 'Workflow Demonstration', targetEnv).catch((err: any) => {
+        console.error('[NEXUS] Could not start teach mode:', err);
+      });
       return;
     }
 

@@ -150,8 +150,12 @@ function createPillWindow() {
     },
   });
 
-  pillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  pillWindow.setAlwaysOnTop(true, 'screen-saver');
+  if (process.platform === 'darwin') {
+    pillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    pillWindow.setAlwaysOnTop(true, 'screen-saver');
+  } else {
+    pillWindow.setAlwaysOnTop(true);
+  }
 
   const baseUrl = process.env.VITE_DEV_SERVER_URL;
   if (baseUrl) {
@@ -287,7 +291,7 @@ function startLoopbackServer() {
 }
 
 function showPillWindow() {
-  if (!pillWindow) createPillWindow();
+  if (!pillWindow || pillWindow.isDestroyed()) createPillWindow();
   if (pillWindow) {
     const primaryDisplay = screen.getPrimaryDisplay();
     const { width: screenWidth } = primaryDisplay.workAreaSize;
@@ -296,8 +300,15 @@ function showPillWindow() {
     const y = PILL_TOP_Y;
     const h = Math.max(currentBounds.height, PILL_COLLAPSED_HEIGHT);
     pillWindow.setBounds({ x, y, width: PILL_WIDTH, height: h }, false);
-    pillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    pillWindow.setAlwaysOnTop(true, 'screen-saver');
+    if (process.platform === 'darwin') {
+      pillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+      pillWindow.setAlwaysOnTop(true, 'screen-saver');
+    } else {
+      pillWindow.setAlwaysOnTop(true);
+    }
+    if (pillWindow.isMinimized()) {
+      pillWindow.restore();
+    }
     pillWindow.show();
     pillWindow.moveTop();
 
@@ -731,7 +742,9 @@ if (!gotTheLock) {
       }
     });
 
-    ipcMain.on('pill-action', (_event, { action, payload }) => {
+    ipcMain.on('pill-action', (_event, data) => {
+      const action = typeof data === 'string' ? data : data?.action;
+      const payload = typeof data === 'object' && data !== null ? data.payload : undefined;
       if (action === 'request-state-sync') {
         if (lastSyncedTaskState && pillWindow && !pillWindow.isDestroyed()) {
           pillWindow.webContents.send('task-state-updated', lastSyncedTaskState);

@@ -85,6 +85,25 @@ class TestBrowserTeachStart(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_manager.discarded, [("teach-test-session", "user-1")])
         self.assertEqual(extension_bridge.commands, [])
 
+    async def test_browser_start_with_fallback_switches_to_desktop_when_extension_offline(self):
+        session_manager = FakeSessionManager()
+        extension_bridge = FakeExtensionBridge(connected=False)
+        user = SimpleNamespace(id="user-1", firebase_uid="firebase-user", email="user@example.com")
+
+        with (
+            patch("backend.agent.skills.session.session_manager", session_manager),
+            patch("backend.agent.tools.web_automation.extension_bridge.extension_bridge", extension_bridge),
+        ):
+            response = await skills.start_teach_session(
+                skills.StartTeachRequest(prompt="Search a site", target_environment="browser", allow_desktop_fallback=True),
+                user,
+            )
+
+        self.assertEqual(response["status"], "recording")
+        self.assertEqual(response["target_environment"], "desktop")
+        self.assertFalse(response["extension_connected"])
+        self.assertEqual(session_manager.discarded, [])
+
     async def test_extension_teach_event_reaches_session_buffer(self):
         session_manager = DemonstrationSessionManager()
         session = await session_manager.start_session(

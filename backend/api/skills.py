@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.firebase_auth import get_current_user_strict
+from backend.core.firebase_auth import get_current_user
 from backend.database.models import User
 from backend.database.session import get_db_session
 from backend.database.repositories.skill_repo import SkillRepository
@@ -105,6 +105,7 @@ class SetHealthRequest(BaseModel):
 class StartTeachRequest(BaseModel):
     prompt: str = Field("", description="Natural language description of the workflow to teach")
     target_environment: str = Field("browser", description="'browser' | 'desktop' | 'mixed'")
+    allow_desktop_fallback: bool = Field(False, description="If True and browser extension is offline, fallback to desktop recording instead of failing.")
 
 
 class StopTeachRequest(BaseModel):
@@ -122,7 +123,7 @@ async def list_skills(
     health_status: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: Optional[AsyncSession] = Depends(get_db_session),
 ):
     """List skills belonging to the authenticated user with optional filtering."""
@@ -166,7 +167,7 @@ async def list_skills(
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_skill(
     payload: CreateSkillRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: Optional[AsyncSession] = Depends(get_db_session),
 ):
     """Create a new automation skill and initialize its v1 version."""
@@ -211,44 +212,59 @@ async def create_skill(
 @router.post("/teach/start")
 async def start_teach_session(
     req: StartTeachRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
 ):
     """Start an interactive demonstration recording session."""
     ensure_authenticated_non_guest(user)
     from backend.agent.skills.session import session_manager
     from backend.agent.tools.web_automation.extension_bridge import extension_bridge
 
+    ext_connected = extension_bridge.is_connected()
+    target_env = req.target_environment
+
     session = await session_manager.start_session(
         user_id=str(user.id),
-        target_environment=req.target_environment,
+        target_environment=target_env,
         prompt_intent=req.prompt.strip() or None,
     )
 
-    ext_connected = extension_bridge.is_connected()
     if req.target_environment in ("browser", "mixed"):
         if not ext_connected:
             ext_connected = await extension_bridge.wait_for_connection(timeout_seconds=3.5)
         if not ext_connected:
-            await session_manager.discard_session(session.session_id, str(user.id))
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Browser recording could not start because the NEXUS extension is not connected.",
-            )
+            if req.allow_desktop_fallback or req.target_environment == "mixed":
+                logger.info("[Teach] Browser extension not connected; seamlessly switching to desktop recording mode.")
+                session.target_environment = "desktop"
+            else:
+                await session_manager.discard_session(session.session_id, str(user.id))
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Browser recording could not start because the NEXUS extension is not connected.",
+                )
 
-        try:
-            result = await extension_bridge.send_command(
-                "start_teach_mode",
-                {"session_id": session.session_id, "prompt": req.prompt.strip()},
-                timeout=8.0,
-            )
-            if not result.get("success"):
-                raise RuntimeError("The browser extension did not confirm that recording started.")
-        except Exception as exc:
-            await session_manager.discard_session(session.session_id, str(user.id))
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Browser recording could not start: {exc}",
-            ) from exc
+        if ext_connected and session.target_environment in ("browser", "mixed"):
+            try:
+                result = await extension_bridge.send_command(
+                    "start_teach_mode",
+                    {"session_id": session.session_id, "prompt": req.prompt.strip()},
+                    timeout=8.0,
+                )
+                if not result.get("success"):
+                    if req.allow_desktop_fallback:
+                        logger.warning("[Teach] Browser extension did not confirm recording; falling back to desktop.")
+                        session.target_environment = "desktop"
+                    else:
+                        raise RuntimeError("The browser extension did not confirm that recording started.")
+            except Exception as exc:
+                if req.allow_desktop_fallback:
+                    logger.warning(f"[Teach] Browser extension error: {exc}; falling back to desktop.")
+                    session.target_environment = "desktop"
+                else:
+                    await session_manager.discard_session(session.session_id, str(user.id))
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"Browser recording could not start: {exc}",
+                    ) from exc
 
     return {
         "session_id": session.session_id,
@@ -262,7 +278,7 @@ async def start_teach_session(
 
 @router.get("/teach/status")
 async def get_teach_session_status(
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
 ):
     """Get active teach session telemetry, duration, and recent captured events."""
     from backend.agent.skills.session import session_manager
@@ -350,7 +366,7 @@ async def stop_teach_direct(
 @router.post("/teach/stop")
 async def stop_teach_session(
     req: StopTeachRequest = StopTeachRequest(),
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
 ):
     """Complete active demonstration and compile raw events into a structured skill draft."""
     from backend.agent.skills.session import session_manager
@@ -556,7 +572,7 @@ async def stop_teach_session(
 
 @router.post("/teach/discard")
 async def discard_teach_session(
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
 ):
     """Discard active demonstration without saving."""
     from backend.agent.skills.session import session_manager
@@ -579,7 +595,7 @@ async def discard_teach_session(
 
 @router.post("/teach/recover")
 async def recover_teach_session(
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
 ):
     """Emergency auto-recovery endpoint: deterministic instant compilation — skips AI entirely.
 
@@ -668,7 +684,7 @@ async def recover_teach_session(
 @router.get("/{skill_id}")
 async def get_skill(
     skill_id: uuid.UUID,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Get full skill details, version history, and execution records."""
@@ -692,7 +708,7 @@ async def get_skill(
 async def update_skill_metadata(
     skill_id: uuid.UUID,
     payload: UpdateSkillMetadataRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Update mutable metadata on a skill without bumping its version number."""
@@ -731,7 +747,7 @@ async def update_skill_metadata(
 async def create_skill_version(
     skill_id: uuid.UUID,
     payload: CreateSkillVersionRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Create a new version for an existing skill with optimistic concurrency check."""
@@ -771,7 +787,7 @@ async def create_skill_version(
 async def rollback_skill_version(
     skill_id: uuid.UUID,
     payload: RollbackVersionRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Roll back a skill to a prior version number by cloning its steps into a new incremented version."""
@@ -806,7 +822,7 @@ async def rollback_skill_version(
 async def set_skill_health(
     skill_id: uuid.UUID,
     payload: SetHealthRequest,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Manually update or reactivate a skill's health status."""
@@ -836,7 +852,7 @@ async def set_skill_health(
 @router.delete("/{skill_id}")
 async def delete_skill(
     skill_id: uuid.UUID,
-    user: User = Depends(get_current_user_strict),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Permanently delete a skill and all its versions and execution history."""
